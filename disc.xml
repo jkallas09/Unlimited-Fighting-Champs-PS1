@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<iso_project>
+  <track type="data">
+    <identifiers system="PLAYSTATION" application="PLAYSTATION" volume="UF_CHAMPS" />
+    <directory_tree>
+      <file name="SYSTEM.CNF" type="data" source="${PROJECT_SOURCE_DIR}/SYSTEM.CNF" />
+      <file name="PSX.EXE" type="data" source="ufc_ps1.exe" />
+      <dummy sectors="1024" />
+    </directory_tree>
+  </track>
+</iso_project>
