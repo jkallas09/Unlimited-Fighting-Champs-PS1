@@ -1,0 +1,40 @@
+name: Build PS1 BIN/CUE
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 git build-essential             gcc-mipsel-linux-gnu g++-mipsel-linux-gnu binutils-mipsel-linux-gnu
+      - name: Install PSn00bSDK from source
+        run: |
+          git clone --depth 1 --recursive https://github.com/Lameguy64/PSn00bSDK.git /tmp/PSn00bSDK
+          cmake -S /tmp/PSn00bSDK -B /tmp/psn00bsdk-build -G Ninja             -DCMAKE_INSTALL_PREFIX="$HOME/psn00bsdk"
+          cmake --build /tmp/psn00bsdk-build --parallel 2
+          cmake --install /tmp/psn00bsdk-build
+      - name: Build game and verify disc
+        env:
+          PSN00BSDK_LIBS: ${{ github.workspace }}/psn00bsdk-placeholder
+        run: |
+          export PSN00BSDK_LIBS="$HOME/psn00bsdk/lib/libpsn00b"
+          export PATH="$HOME/psn00bsdk/bin:$PATH"
+          bash build_disc.sh
+      - name: Upload playable disc files
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unlimited-Fighting-Champs-PS1-BIN-CUE
+          path: |
+            output/*.bin
+            output/*.cue
+            output/*.exe
+          if-no-files-found: error
