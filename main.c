@@ -1,4 +1,4 @@
-/* Unlimited Fighting Champs 0.4 - original polygonal PS1 combat prototype.
+/* Unlimited Fighting Champs 0.5 - original polygonal PS1 combat prototype.
  * Integer-only perspective renderer; no commercial meshes or textures.
  */
 #include <stdint.h>
@@ -9,6 +9,8 @@
 #include <psxapi.h>
 #include <psxetc.h>
 #include <psxgte.h>
+#include <psxspu.h>
+#include "music_meta.h"
 #endif
 
 #define PAD_LEFT 0x0080
@@ -27,6 +29,7 @@
 typedef struct {
     int x,z,hp,stamina,facing,guard,flash;
     int attack,age,walk,fall,character;
+    int vx,vz,rem_x,rem_z,stun,attack_hit,face_x,face_z,elevation;
 } Fighter;
 typedef struct {
     const char *name,*nickname;
@@ -39,12 +42,15 @@ static const Character roster[4]={
     {"BROCK LUNCHNER","THE LUNCH BREAK",221,176,139,176,45,39,166,123,64,5,108,0,2},
     {"CHUCK LIDDOODLE","THE ICED LATTE",198,145,111,42,99,195,43,29,24,2,99,1,3}
 };
-enum {SCREEN_TITLE,SCREEN_MODE,SCREEN_CHARACTER,SCREEN_FIGHT};
+enum {SCREEN_TITLE,SCREEN_MODE,SCREEN_CHARACTER,SCREEN_WALKOUT,SCREEN_FIGHT};
 static int app_screen=SCREEN_TITLE,chosen_character,opponent_character=1,menu_ticks;
 static uint16_t menu_previous;
+static int walkout_phase,walkout_frame;
+#define WALKOUT_FRAMES 300
 
 static Fighter player,cpu;
 static int round_frames,finished,restart_delay,paused,ticks;
+static int impact_frames,impact_shake;
 static uint16_t previous_pad;
 static unsigned int seed=0x1234567u;
 static int clamp(int v,int lo,int hi) { return v<lo?lo:(v>hi?hi:v); }
@@ -55,9 +61,9 @@ static const int contact[5]={0,7,12,10,15};
 static const int power[5]={0,6,13,9,17};
 static const int reach[5]={0,81,92,102,113};
 static void reset_match(void) {
-    player=(Fighter){.x=-100,.z=0,.hp=100,.stamina=100,.facing=1,.character=chosen_character};
-    cpu=(Fighter){.x=100,.z=0,.hp=100,.stamina=100,.facing=-1,.character=opponent_character};
-    round_frames=60*90;finished=0;restart_delay=0;paused=0;
+    player=(Fighter){.x=-100,.z=0,.hp=100,.stamina=100,.facing=1,.character=chosen_character,.face_x=1024};
+    cpu=(Fighter){.x=100,.z=0,.hp=100,.stamina=100,.facing=-1,.character=opponent_character,.face_x=1024};
+    round_frames=60*90;finished=0;restart_delay=0;paused=0;impact_frames=impact_shake=0;
 }
 static void boundary(Fighter *f) {
     f->x=clamp(f->x,-230,230); f->z=clamp(f->z,-145,145);
@@ -67,69 +73,125 @@ static void boundary(Fighter *f) {
     }
 }
 static void start_attack(Fighter *f,int type) {
-    if(f->attack||f->guard||f->stamina<power[type]/2||finished) return;
-    f->attack=type;f->age=0;f->stamina-=power[type]/2;
+    if(f->attack||f->guard||f->stun||f->stamina<power[type]/2||finished) return;
+    f->attack=type;f->age=0;f->attack_hit=0;f->stamina-=power[type]/2;
+}
+static int root_int(int value) {
+    unsigned int n=(unsigned int)value,result=0,bit=1u<<30;
+    while(bit>n)bit>>=2;
+    while(bit) {if(n>=result+bit){n-=result+bit;result=(result>>1)+bit;}else result>>=1;bit>>=2;}
+    return (int)result;
+}
+static int approach(int value,int target,int amount) {
+    return value<target?clamp(value+amount,value,target):clamp(value-amount,target,value);
+}
+static void face_opponent(Fighter *a,Fighter *b) {
+    if(a->attack && a->age>=3)return;
+    int dx=b->x-a->x,dz=b->z-a->z,dist=root_int(dx*dx+dz*dz);
+    if(!dist)return;
+    a->facing=dx>=0?1:-1;
+    int tx=absi(dx)*1024/dist,tz=dz*a->facing*1024/dist;
+    a->face_x+=(tx-a->face_x)/3;a->face_z+=(tz-a->face_z)/3;
+}
+static void move_body(Fighter *f,int input_x,int input_z) {
+    int maxspeed=f->guard?280:(f->attack?330:(f->stamina<15?490:720));
+    int diagonal=input_x && input_z;
+    if(diagonal)maxspeed=maxspeed*181/256;
+    if(f->stun) {input_x=input_z=0;f->stun--;}
+    int acceleration=f->stun?70:100;
+    f->vx=approach(f->vx,input_x*maxspeed,acceleration);
+    f->vz=approach(f->vz,input_z*maxspeed,acceleration);
+    int px=f->vx+f->rem_x,pz=f->vz+f->rem_z;
+    int ox=f->x,oz=f->z;
+    f->x+=px/256;f->z+=pz/256;f->rem_x=px%256;f->rem_z=pz%256;
+    boundary(f);
+    if(f->x!=ox+px/256)f->vx=f->rem_x=0;
+    if(f->z!=oz+pz/256)f->vz=f->rem_z=0;
+    if(f->x!=ox||f->z!=oz)f->walk+=150;else f->walk=0;
+}
+static void separate_bodies(void) {
+    int dx=cpu.x-player.x,dz=cpu.z-player.z,sq=dx*dx+dz*dz;
+    if(sq>=40*40)return;
+    if(!sq){dx=player.facing;dz=0;sq=1;}
+    int dist=root_int(sq);if(!dist)dist=1;
+    int overlap=41-dist;
+    int den=dist*2;
+    int push_x=(absi(dx)*overlap+den-1)/den*(dx>=0?1:-1);
+    int push_z=(absi(dz)*overlap+den-1)/den*(dz>=0?1:-1);
+    if(!push_x&&!push_z)push_x=dx>=0?1:-1;
+    player.x-=push_x;cpu.x+=push_x;player.z-=push_z;cpu.z+=push_z;
+    player.vx/=2;cpu.vx/=2;player.vz/=2;cpu.vz/=2;
+    boundary(&player);boundary(&cpu);
 }
 static void animate_and_hit(Fighter *a,Fighter *b) {
-    if(a->flash) a->flash--;
-    if((ticks&3)==0 && a->stamina<100) a->stamina++;
-    if(!a->attack) return;
-    int type=a->attack;
-    a->age++;
-    if(a->age==contact[type] && absi(a->x-b->x)<reach[type]
-        && absi(a->z-b->z)<36 && (b->x-a->x)*a->facing>0) {
-        b->hp=clamp(b->hp-(b->guard?power[type]/4:power[type]),0,100);
-        b->flash=7;
-        b->x+=a->facing*(b->guard?3:9);boundary(b);
-        if(!b->hp) {finished=1;restart_delay=120;}
+    if(a->flash)a->flash--;
+    if(!a->attack && (ticks & (a->guard?7:3))==0 && a->stamina<100)a->stamina++;
+    if(!a->attack)return;
+    int type=a->attack;a->age++;
+    int dx=b->x-a->x,dz=b->z-a->z;
+    int fx=a->face_x*a->facing,fz=a->face_z*a->facing;
+    int forward=(dx*fx+dz*fz)/1024,lateral=absi(-dx*fz+dz*fx)/1024;
+    int dist2=dx*dx+dz*dz;
+    if(!a->attack_hit && a->age>=contact[type] && a->age<=contact[type]+2
+        && forward>0 && lateral<(type>=3?32:25) && dist2<reach[type]*reach[type]) {
+        int bfx=b->face_x*b->facing,bfz=b->face_z*b->facing;
+        int defends=(-dx*bfx-dz*bfz)>0;
+        int broken=defends && b->guard && b->stamina<4;
+        int blocked=defends && b->guard==(type==3?2:1) && !broken;
+        if(broken)b->guard=0;
+        int counter=b->attack && b->age<contact[b->attack];
+        int dmg=power[type]+(counter?2:0);
+        if(a->stamina<15)dmg=dmg*3/4;
+        if(dist2>reach[type]*reach[type]*81/100)dmg=dmg*3/4;
+        if(blocked)dmg=power[type]/4;
+        b->hp=clamp(b->hp-dmg,0,100);b->flash=blocked?3:7;
+        a->attack_hit=1;
+        int dist=root_int(dist2);if(!dist)dist=1;
+        int force=blocked?320:(type==1?650:1050);
+        b->vx+=dx*force/dist;b->vz+=dz*force/dist;
+        b->stun=broken?14:(blocked?2:(type==1?6:10));
+        if(!blocked && b->attack && b->age<contact[b->attack])b->attack=b->age=0;
+        if(blocked)b->stamina=clamp(b->stamina-power[type]/3,0,100);
+        impact_frames=blocked?0:(type==1?1:2);
+        impact_shake=blocked?0:(type>=2?3:1);
+        if(!b->hp){finished=1;restart_delay=120;}
     }
-    if(a->age>=duration[type]) {a->attack=0;a->age=0;}
+    if(a->age>=duration[type]){a->attack=0;a->age=0;a->attack_hit=0;}
 }
 static void game_tick(uint16_t p) {
-    uint16_t pressed=p & ~previous_pad; previous_pad=p;
-    if(pressed&PAD_START) paused=!paused;
-    if(paused) return;
+    uint16_t pressed=p & ~previous_pad;previous_pad=p;
+    if(pressed&PAD_START)paused=!paused;
+    if(paused)return;
     ticks++;
     if(finished) {
-        if(!player.hp && player.fall<18) player.fall++;
-        if(!cpu.hp && cpu.fall<18) cpu.fall++;
-        if(restart_delay) restart_delay--;
-        if(!restart_delay && (pressed&PAD_CROSS)) reset_match();
+        if(!player.hp&&player.fall<18)player.fall++;
+        if(!cpu.hp&&cpu.fall<18)cpu.fall++;
+        if(restart_delay)restart_delay--;
+        if(!restart_delay&&(pressed&PAD_CROSS))reset_match();
         return;
     }
-    if(--round_frames<=0) {round_frames=0;finished=1;restart_delay=90;return;}
-    player.guard=!!(p&(PAD_L1|PAD_L2)) && !player.attack;
-    int speed=player.guard?1:(player.attack?1:3);
-    int ox=player.x,oz=player.z;
-    if(p&PAD_LEFT) player.x-=speed;
-    if(p&PAD_RIGHT) player.x+=speed;
-    if(p&PAD_UP) player.z+=speed;
-    if(p&PAD_DOWN) player.z-=speed;
-    boundary(&player);
-    if(ox!=player.x||oz!=player.z) player.walk+=180;else player.walk=0;
-    player.facing=player.x<=cpu.x?1:-1;cpu.facing=-player.facing;
-    cpu.guard=!cpu.attack && player.attack && absi(cpu.x-player.x)<115 && rnd()%3==0;
-    ox=cpu.x;oz=cpu.z;
-    if(!cpu.attack && !cpu.guard) {
-        if(absi(cpu.x-player.x)>73) cpu.x+=cpu.facing*2;
-        else if(absi(cpu.x-player.x)<53) cpu.x-=cpu.facing;
-        if(absi(cpu.z-player.z)>5) cpu.z+=cpu.z<player.z?2:-2;
+    if(--round_frames<=0){round_frames=0;finished=1;restart_delay=90;return;}
+    if(impact_frames){impact_frames--;return;}
+    player.guard=(!player.attack&&!player.stun)?((p&PAD_L2)?2:((p&PAD_L1)?1:0)):0;
+    face_opponent(&player,&cpu);face_opponent(&cpu,&player);
+    move_body(&player,!!(p&PAD_RIGHT)-!!(p&PAD_LEFT),!!(p&PAD_UP)-!!(p&PAD_DOWN));
+    int dx=player.x-cpu.x,dz=player.z-cpu.z;
+    cpu.guard=(!cpu.attack&&!cpu.stun&&player.attack&&absi(dx)<115 && rnd()%3==0)
+        ?(player.attack==3?2:1):0;
+    int ix=0,iz=0;
+    if(!cpu.attack&&!cpu.guard) {
+        if(absi(dx)>72)ix=dx>0?1:-1;
+        else if(absi(dx)<50)ix=dx>0?-1:1;
+        if(absi(dz)>12)iz=dz>0?1:-1;
     }
-    boundary(&cpu);
-    if(ox!=cpu.x||oz!=cpu.z) cpu.walk+=160;else cpu.walk=0;
-    /* Keep bodies separate while allowing a sidestep around the opponent. */
-    if(absi(player.z-cpu.z)<26 && absi(player.x-cpu.x)<39) {
-        int middle=(player.x+cpu.x)/2;
-        player.x=middle-player.facing*20;cpu.x=middle+player.facing*20;
-        boundary(&player);boundary(&cpu);
-    }
-    if(p&PAD_SQUARE) start_attack(&player,1);
-    else if(p&PAD_TRIANGLE) start_attack(&player,2);
-    else if(p&PAD_CROSS) start_attack(&player,3);
-    else if(p&PAD_CIRCLE) start_attack(&player,4);
-    if(!cpu.guard && rnd()%24==0) start_attack(&cpu,1+rnd()%4);
-    animate_and_hit(&player,&cpu);
-    if(!finished) animate_and_hit(&cpu,&player);
+    /* CPU uses the same acceleration, collision and recovery rules. */
+    move_body(&cpu,ix,iz);separate_bodies();
+    if(p&PAD_SQUARE)start_attack(&player,1);
+    else if(p&PAD_TRIANGLE)start_attack(&player,2);
+    else if(p&PAD_CROSS)start_attack(&player,3);
+    else if(p&PAD_CIRCLE)start_attack(&player,4);
+    if(!cpu.guard && rnd()%24==0)start_attack(&cpu,1+rnd()%4);
+    animate_and_hit(&player,&cpu);if(!finished)animate_and_hit(&cpu,&player);
 }
 
 /* Menu input uses press edges: holding Start cannot skip multiple screens. */
@@ -143,6 +205,14 @@ static void app_tick(uint16_t p) {
         game_tick(p);return;
     }
     menu_ticks++;ticks++;
+    if(app_screen==SCREEN_WALKOUT) {
+        walkout_frame++;
+        if(walkout_frame>=WALKOUT_FRAMES || (pressed&PAD_START)) {
+            if(!walkout_phase){walkout_phase=1;walkout_frame=0;}
+            else {reset_match();previous_pad=p;app_screen=SCREEN_FIGHT;}
+        }
+        return;
+    }
     if(app_screen==SCREEN_TITLE) {
         if(pressed&PAD_START)app_screen=SCREEN_MODE;
     } else if(app_screen==SCREEN_MODE) {
@@ -154,7 +224,7 @@ static void app_tick(uint16_t p) {
         else if(pressed&(PAD_LEFT|PAD_UP))chosen_character=(chosen_character+3)%4;
         if(pressed&(PAD_START|PAD_CROSS)) {
             opponent_character=(chosen_character+1+(int)(rnd()%3))%4;
-            reset_match();previous_pad=p;app_screen=SCREEN_FIGHT;
+            reset_match();previous_pad=p;walkout_phase=walkout_frame=0;app_screen=SCREEN_WALKOUT;
         }
     }
 }
@@ -163,13 +233,16 @@ static void app_tick(uint16_t p) {
 #define W 320
 #define H 240
 #define OT_LEN 1024
-#define PACKETS 65536
+#define PACKETS 98304
 static DISPENV disp[2];static DRAWENV draw[2];
 static uint32_t ot[2][OT_LEN],packet[2][PACKETS/4];
 static uint8_t pad1[34],pad2[34];
 static int db,cursor,font_top,font_bottom,font_menu,cam_x,cam_z,cam_distance=790,cam_yaw=-180;
 static int camera_side;
 static int view_sin,view_cos;
+static int cam_pitch=250,view_pitch_sin=250,view_pitch_cos=993,cam_target_y=95,view_center_y=124;
+static int shake_x,shake_y;
+static void *background_tail;
 static void *hud_tail;
 static int depth_override;
 typedef struct {int x,y,z;} Vec;
@@ -187,14 +260,14 @@ static Screen project(Vec p) {
     int x=p.x-cam_x,z=p.z-cam_z;
     int s=view_sin,c=view_cos;
     int xx=(x*c-z*s)>>12,zz=(x*s+z*c)>>12;
-    int yy=85-p.y;
-    int depth=cam_distance+(zz*15+yy*5)/16;
+    int yy=cam_target_y-p.y;
+    int depth=cam_distance+(zz*view_pitch_cos+yy*view_pitch_sin)/1024;
     if(depth<64) return (Screen){0,0,-1};
-    return (Screen){160+xx*420/depth,126+(yy*15+zz*5)*420/(16*depth),depth};
+    return (Screen){160+shake_x+xx*420/depth,view_center_y+shake_y+(yy*view_pitch_cos-zz*view_pitch_sin)*420/(1024*depth),depth};
 }
 static void face(Vec a,Vec b,Vec c,Vec d,int r,int g,int blue,int shade) {
     Screen v[4]={project(a),project(b),project(c),project(d)};
-    for(int i=0;i<4;i++) if(v[i].d<0) return;
+    for(int i=0;i<4;i++) if(v[i].d<0 || absi(v[i].x)>1000 || absi(v[i].y)>1000) return;
     int depth=(v[0].d+v[1].d+v[2].d+v[3].d)/4;
     POLY_F4 *p=alloc_prim(sizeof(POLY_F4));if(!p)return;
     setPolyF4(p);setRGB0(p,r*shade/256,g*shade/256,blue*shade/256);
@@ -202,7 +275,7 @@ static void face(Vec a,Vec b,Vec c,Vec d,int r,int g,int blue,int shade) {
     addPrim(ot[db]+(depth_override?depth_override:clamp(depth/2,1,OT_LEN-1)),p);
 }
 static void edge(Vec a,Vec b,int r,int g,int blue) {
-    Screen u=project(a),v=project(b);if(u.d<0||v.d<0)return;
+    Screen u=project(a),v=project(b);if(u.d<0||v.d<0||absi(u.x)>1000||absi(u.y)>1000||absi(v.x)>1000||absi(v.y)>1000)return;
     LINE_F2 *p=alloc_prim(sizeof(LINE_F2));if(!p)return;
     setLineF2(p);setRGB0(p,r,g,blue);setXY2(p,u.x,u.y,v.x,v.y);
     addPrim(ot[db]+(depth_override?depth_override:clamp((u.d+v.d)/4-1,1,OT_LEN-1)),p);
@@ -224,8 +297,10 @@ static Vec body_vertex(Fighter *f,Vec p) {
     /* Collapse the articulated model sideways on a knockout. */
     int oldy=p.y;
     p.x+=oldy*f->fall/20;p.y=oldy*(18-f->fall)/18+f->fall/2;
-    p.y=p.y*roster[f->character].height/100;
-    return vec(f->x+p.x*f->facing,p.y,f->z+p.z);
+    p.y=p.y*roster[f->character].height/100+f->elevation;
+    int cx=f->face_x,cz=f->face_z;if(!cx&&!cz)cx=1024;
+    int xx=p.x*f->facing;
+    return vec(f->x+(xx*cx-p.z*cz)/1024,p.y,f->z+(xx*cz+p.z*cx)/1024);
 }
 /* Anatomical lofts share projected vertices and use Gouraud lighting. */
 typedef struct {int y,rx,rz,dx;} Ring;
@@ -395,7 +470,8 @@ static void fighter_draw(Fighter *f,int red,int green,int blue) {
     for(int side=-1;side<=1;side+=2) {
         Vec shoulder=vec(lean/2+1,133+bob,side*(25+broad));
         Vec elbow=vec(10,108+bob,side*28),hand=vec(28,133+bob,side*18);
-        if(f->guard){elbow=vec(16,126,side*25);hand=vec(28,157,side*12);}
+        if(f->guard==1){elbow=vec(16,126,side*25);hand=vec(28,157,side*12);}
+        if(f->guard==2){elbow=vec(15,105,side*25);hand=vec(27,120,side*13);}
         if(f->attack && f->attack<3 && side==(f->attack==1?-1:1)) {
             elbow.x+=pulse*32/256;elbow.y+=pulse*20/256;
             hand.x+=pulse*(f->attack==2?55:47)/256;hand.y+=pulse*5/256;
@@ -412,65 +488,113 @@ static void fighter_draw(Fighter *f,int red,int green,int blue) {
 
 static const int ring_x[8]={-240,240,300,300,240,-240,-300,-300};
 static const int ring_z[8]={-190,-190,-130,130,190,190,130,-130};
+static void world_gradient(Vec a,Vec b,Vec c,Vec d,int r,int g,int blue,int sa,int sb,int sc,int sd) {
+    Screen v[4]={project(a),project(b),project(c),project(d)};
+    for(int i=0;i<4;i++)if(v[i].d<0 || absi(v[i].x)>1000 || absi(v[i].y)>1000)return;
+    POLY_G4 *p=alloc_prim(sizeof(POLY_G4));if(!p)return;
+    setPolyG4(p);setXY4(p,v[0].x,v[0].y,v[1].x,v[1].y,v[2].x,v[2].y,v[3].x,v[3].y);
+    setRGB0(p,r*sa/256,g*sa/256,blue*sa/256);setRGB1(p,r*sb/256,g*sb/256,blue*sb/256);
+    setRGB2(p,r*sc/256,g*sc/256,blue*sc/256);setRGB3(p,r*sd/256,g*sd/256,blue*sd/256);
+    int dep=(v[0].d+v[1].d+v[2].d+v[3].d)/4;
+    addPrim(ot[db]+(depth_override?depth_override:clamp(dep/2,1,OT_LEN-5)),p);
+}
+static int mat_light(int x,int z) {return clamp(256-(absi(x)+absi(z))*2/7,140,256);}
+static void world_text(int x,int y,int z,const char *text,int size,int upright,int r,int g,int b);
+static Vec on_fence(int i,int t,int y) {
+    int j=(i+1)%8;
+    return vec(ring_x[i]+(ring_x[j]-ring_x[i])*t/256,y,ring_z[i]+(ring_z[j]-ring_z[i])*t/256);
+}
+static void stadium(void) {
+    /* Seats and audience are inexpensive lit billboards, well beyond the cage. */
+    for(int row=0;row<3;row++) {
+        int z=300+row*85,y=12+row*30;
+        world_gradient(vec(-520,y,z),vec(520,y,z),vec(-520,y+27,z+55),vec(520,y+27,z+55),29,39,57,170,170,256,256);
+        for(int i=0;i<18;i++) {
+            int x=-490+i*58+(row&1)*18;
+            if(absi(x)<75)continue;
+            int tone=(i*13+row*21)%5;
+            world_gradient(vec(x-12,y+5,z),vec(x+12,y+5,z),vec(x-9,y+32,z),vec(x+9,y+32,z),42+tone*13,45+tone*5,67+tone*4,140,140,230,230);
+            face(vec(x-5,y+32,z-1),vec(x+5,y+32,z-1),vec(x-5,y+43,z-1),vec(x+5,y+43,z-1),103+tone*16,76+tone*12,61+tone*9,210);
+            if((ticks/5+i*17+row*9)%101==0)box(x+9,y+31,z-3,2,2,1,220,236,255);
+        }
+    }
+    /* Entrance tunnel, lit truss and an aisle leading to the fighting floor. */
+    box(-73,100,470,8,100,12,28,35,49);box(73,100,470,8,100,12,28,35,49);
+    box(0,200,470,80,7,12,35,42,56);
+    box(-66,100,452,2,92,2,42,164,210);box(66,100,452,2,92,2,227,61,70);
+    world_gradient(vec(-60,0,200),vec(60,0,200),vec(-60,15,475),vec(60,15,475),48,55,69,256,256,125,125);
+    edge(vec(-60,2,200),vec(-60,16,475),45,148,191);edge(vec(60,2,200),vec(60,16,475),181,49,63);
+    for(int i=-2;i<=2;i++) {
+        box(i*150,245,220,15,3,10,184,204,228);
+        edge(vec(i*150-40,238,220),vec(i*150+40,252,220),70,84,104);
+    }
+    for(int i=-4;i<=4;i++) {
+        int x=i*70;
+        world_gradient(vec(x-32,25,223),vec(x+32,25,223),vec(x-32,48,223),vec(x+32,48,223),i%2?180:31,i%2?42:115,i%2?57:151,120,120,256,256);
+    }
+    world_text(-98,70,455,"FIGHT NIGHT",3,1,179,205,225);
+}
 static void arena(void) {
-    /* Eight-sided canvas fan; each quad uses a degenerate triangle. */
+    stadium();
+    /* Subdivided canvas with a bright center and darker perimeter. */
+    const int rows[7]={-190,-130,-65,0,65,130,190};
+    depth_override=1022;
+    for(int row=0;row<6;row++) {
+        int z0=rows[row],z1=rows[row+1];
+        int w0=300-(absi(z0)>130?absi(z0)-130:0);
+        int w1=300-(absi(z1)>130?absi(z1)-130:0);
+        for(int col=0;col<10;col++) {
+            int x0=-w0+2*w0*col/10,x1=-w0+2*w0*(col+1)/10;
+            int x2=-w1+2*w1*col/10,x3=-w1+2*w1*(col+1)/10;
+            world_gradient(vec(x0,0,z0),vec(x1,0,z0),vec(x2,0,z1),vec(x3,0,z1),188,196,193,
+                mat_light(x0,z0),mat_light(x1,z0),mat_light(x2,z1),mat_light(x3,z1));
+        }
+    }
+    depth_override=1021;
+    world_text(-106,3,30,"UNLIMITED",4,0,47,56,66);
+    world_text(-71,3,-14,"CHAMPS",4,0,149,37,45);
     for(int i=0;i<8;i++) {
         int j=(i+1)%8;
-        depth_override=1023;
-        face(vec(0,0,0),vec(ring_x[i],0,ring_z[i]),vec(ring_x[j],0,ring_z[j]),vec(ring_x[j],0,ring_z[j]),91+(i%2)*7,116+(i%2)*7,127+(i%2)*7,256);
-        depth_override=1022;
-        edge(vec(ring_x[i],1,ring_z[i]),vec(ring_x[j],1,ring_z[j]),221,192,91);
-        depth_override=0;
-        box(ring_x[i],55,ring_z[i],5,55,5,38,46,58);
-        for(int y=35;y<=95;y+=30) edge(vec(ring_x[i],y,ring_z[i]),vec(ring_x[j],y,ring_z[j]),y==95?190:90,y==95?174:104,y==95?122:116);
-        /* A low-poly audience silhouette beyond each post. */
-        box(ring_x[i]*5/4,36,ring_z[i]*5/4,20,20,12,30+i*4,36+i*3,53);
-        box(ring_x[i]*5/4,62,ring_z[i]*5/4,8,8,8,85,69,66);
+        edge(vec(ring_x[i],3,ring_z[i]),vec(ring_x[j],3,ring_z[j]),190,43,53);
+        edge(vec(ring_x[i]*9/10,3,ring_z[i]*9/10),vec(ring_x[j]*9/10,3,ring_z[j]*9/10),77,92,99);
     }
-    /* World-space mat markings and central diamond. */
-    depth_override=1022;
-    for(int i=-2;i<=2;i++) {
-        edge(vec(-230,2,i*60),vec(230,2,i*60),104,135,144);
-        edge(vec(i*80,2,-145),vec(i*80,2,145),104,135,144);
+    depth_override=0;
+    /* Hide the camera-side cage panels so mesh cannot obscure the fighters. */
+    for(int i=0;i<8;i++) {
+        int j=(i+1)%8;
+        int mx=(ring_x[i]+ring_x[j])/2-cam_x,mz=(ring_z[i]+ring_z[j])/2-cam_z;
+        int view_z=(mx*view_sin+mz*view_cos)>>12;
+        if(view_z<-50)continue;
+        box(ring_x[i],91,ring_z[i],5,91,5,28,37,47);
+        box(ring_x[i],132,ring_z[i],8,42,8,(i&1)?140:34,(i&1)?41:84,(i&1)?49:117);
+        edge(on_fence(i,0,182),on_fence(i,256,182),103,119,131);
+        edge(on_fence(i,0,10),on_fence(i,256,10),64,75,84);
+        for(int segment=0;segment<8;segment++)for(int row=0;row<4;row++) {
+            if(i==4 && (segment==3 || segment==4))continue;
+            int t0=segment*32,t1=t0+32,mid=t0+16,y=12+row*40;
+            edge(on_fence(i,t0,y),on_fence(i,mid,y+20),48,60,71);
+            edge(on_fence(i,mid,y+20),on_fence(i,t1,y),48,60,71);
+            edge(on_fence(i,t0,y+40),on_fence(i,mid,y+20),48,60,71);
+            edge(on_fence(i,mid,y+20),on_fence(i,t1,y+40),48,60,71);
+        }
     }
-    edge(vec(-48,3,0),vec(0,3,40),220,201,150);edge(vec(0,3,40),vec(48,3,0),220,201,150);
-    edge(vec(48,3,0),vec(0,3,-40),220,201,150);edge(vec(0,3,-40),vec(-48,3,0),220,201,150);
-    depth_override=1021;
+    depth_override=1020;
     Fighter *fighters[2]={&player,&cpu};
-    for(int i=0;i<2;i++) {
-        Fighter *f=fighters[i];
-        face(vec(f->x-23,3,f->z-23),vec(f->x+23,3,f->z-23),vec(f->x-23,3,f->z+23),vec(f->x+23,3,f->z+23),48,64,72,256);
+    for(int f=0;f<2;f++)for(int i=0;i<8;i++) {
+        Fighter *who=fighters[f];int j=(i+1)%8;
+        Vec center=vec(who->x,2,who->z);
+        Vec a=vec(who->x+oct_cos[i]*24/1024,2,who->z+oct_sin[i]*17/1024);
+        Vec b=vec(who->x+oct_cos[j]*24/1024,2,who->z+oct_sin[j]*17/1024);
+        face(center,a,b,b,86,98,103,210);
     }
     depth_override=0;
 }
+
 static void hud_rect(int x,int y,int w,int h,int r,int g,int b) {
     if(w<=0)return;
     POLY_F4 *p=alloc_prim(sizeof(POLY_F4));if(!p)return;
     setPolyF4(p);setRGB0(p,r,g,b);setXY4(p,x,y,x+w,y,x,y+h,x+w,y+h);
     addPrim(hud_tail,p);hud_tail=p;
-}
-static void render(void) {
-    int tx=(player.x+cpu.x)/2,tz=(player.z+cpu.z)/2;
-    int target=590+absi(player.x-cpu.x)*2/3;
-    cam_x+=(tx-cam_x)/8;cam_z+=(tz-cam_z)/8;
-    cam_distance+=(target-cam_distance)/8;cam_yaw+=((camera_side?180:-180)-cam_yaw)/8;
-    view_sin=isin(cam_yaw);view_cos=icos(cam_yaw);
-    db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];
-    arena();
-    const Character *pc=&roster[player.character],*cc=&roster[cpu.character];
-    fighter_draw(&player,pc->short_r,pc->short_g,pc->short_b);
-    fighter_draw(&cpu,cc->short_r,cc->short_g,cc->short_b);
-    hud_rect(8,31,142,10,49,26,32);hud_rect(170,31,142,10,49,26,32);
-    hud_rect(9,32,player.hp*140/100,8,60,190,119);hud_rect(171,32,cpu.hp*140/100,8,60,190,119);
-    hud_rect(9,44,player.stamina*140/100,3,237,189,61);hud_rect(171,44,cpu.stamina*140/100,3,237,189,61);
-    FntPrint(font_top,"UNLIMITED FIGHTING CHAMPS   %02d\n%s VS %s",round_frames/60,pc->name,cc->name);
-    if(paused) FntPrint(font_bottom,"PAUSED - START TO RESUME\nO: FIGHTER SELECT  SELECT: CAMERA");
-    else if(finished) {
-        const char *winner=player.hp==cpu.hp?"DRAW":(player.hp>cpu.hp?"YOU WIN":"CPU WINS");
-        FntPrint(font_bottom,"%s - %s\nX REMATCH  O FIGHTER SELECT",winner,(!player.hp||!cpu.hp)?"KNOCKOUT":"TIME UP");
-    } else FntPrint(font_bottom,"[] JAB /\\ POWER X KICK O HEAVY\nL1/L2 GUARD  START PAUSE  SELECT CAM");
-    DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);
-    DrawOTag(ot[db]+OT_LEN-1);FntFlush(font_top);FntFlush(font_bottom);
 }
 /* Compact display lettering; horizontal runs reduce GPU packet usage. */
 static const uint8_t alphabet[36][7]={
@@ -512,30 +636,129 @@ static void center_text(int y,const char *text,int scale,int r,int g,int b) {
     int n=0;while(text[n])n++;
     lettering((W-(n*6-1)*scale)/2,y,text,scale,r,g,b);
 }
-static void menu_line(int x,int y,int xx,int yy,int r,int g,int b) {
-    LINE_F2 *p=alloc_prim(sizeof(LINE_F2));if(!p)return;
-    setLineF2(p);setRGB0(p,r,g,b);setXY2(p,x,y,xx,yy);addPrim(hud_tail,p);hud_tail=p;
-}
 static void menu_panel(int x,int y,int w,int h,int selected,int r,int g,int b) {
     hud_rect(x,y,w,h,selected?r:43,selected?g:52,selected?b:68);
     hud_rect(x+2,y+2,w-4,h-4,selected?31:18,selected?40:24,selected?51:35);
     if(selected)hud_rect(x+4,y+4,3,h-8,r,g,b);
 }
+static void world_text(int x,int y,int z,const char *text,int size,int upright,int r,int g,int b) {
+    for(;*text;text++,x+=6*size) {
+        if(*text<'A'||*text>'Z')continue;
+        for(int row=0;row<7;row++)for(int col=0;col<5;) {
+            int bits=alphabet[*text-'A'][row];if(!(bits&(16>>col))){col++;continue;}
+            int start=col;while(col<5&&(bits&(16>>col)))col++;
+            int xx=x+start*size,xx1=x+col*size;
+            Vec a=vec(xx,y,z),bb=vec(xx1,y,z),c=a,d=bb;
+            if(upright){a.y=bb.y=y-row*size;c.y=d.y=y-(row+1)*size;}
+            else {a.z=bb.z=z-row*size;c.z=d.z=z-(row+1)*size;}
+            face(a,bb,c,d,r,g,b,256);
+        }
+    }
+}
+static void screen_glow(int x0,int y0,int x1,int y1,int x2,int y2,int x3,int y3,
+    int r,int g,int b,int top,int bottom) {
+    POLY_G4 *p=alloc_prim(sizeof(POLY_G4));if(!p)return;
+    setPolyG4(p);setXY4(p,x0,y0,x1,y1,x2,y2,x3,y3);
+    setRGB0(p,r*top/256,g*top/256,b*top/256);setRGB1(p,r*top/256,g*top/256,b*top/256);
+    setRGB2(p,r*bottom/256,g*bottom/256,b*bottom/256);setRGB3(p,r*bottom/256,g*bottom/256,b*bottom/256);
+    addPrim(background_tail,p);background_tail=p;
+}
+static void backdrop(void) {
+    background_tail=ot[db]+1023;
+    screen_glow(0,0,320,0,0,240,320,240,20,30,46,90,256);
+    screen_glow(-75,0,-30,0,100,240,230,240,35,70,95,190,70);
+    screen_glow(300,0,335,0,70,240,200,240,91,31,43,155,55);
+    for(int i=0;i<18;i++) {
+        int x=7+i*18;
+        screen_glow(x,57,x+8,57,x-1,60,x+9,60,152,187,207,110,220);
+    }
+}
+static void hud_quad(int x0,int y0,int x1,int y1,int x2,int y2,int x3,int y3,int r,int g,int b) {
+    POLY_F4 *p=alloc_prim(sizeof(POLY_F4));if(!p)return;
+    setPolyF4(p);setRGB0(p,r,g,b);setXY4(p,x0,y0,x1,y1,x2,y2,x3,y3);addPrim(hud_tail,p);hud_tail=p;
+}
+static void set_view(int yaw,int pitch,int target_y) {
+    cam_yaw=yaw;cam_pitch=pitch;cam_target_y=target_y;
+    view_sin=isin(yaw);view_cos=icos(yaw);
+    view_pitch_sin=pitch;view_pitch_cos=SquareRoot0(1024*1024-pitch*pitch);
+    view_center_y=124;shake_x=shake_y=0;
+}
+static void broadcast_camera(void) {
+    int tx=(player.x+cpu.x)/2,tz=(player.z+cpu.z)/2;
+    int dx=cpu.x-player.x,dz=cpu.z-player.z;
+    if(dx<0)dz=-dz;
+    int base=camera_side==0?-70:(camera_side==1?-285:95);
+    int yaw=base-clamp(dz*430/(absi(dx)+70),-270,270);
+    int target_pitch=camera_side==0?250:(camera_side==1?420:150);
+    int span=absi(dx)+absi(dz)/2;
+    int target=clamp(620+span*3/5,660,990);
+    if(camera_side==1)target+=60;
+    cam_x+=(tx-cam_x)/7;cam_z+=(tz-cam_z)/7;
+    cam_distance+=(target-cam_distance)/10;
+    cam_yaw+=(yaw-cam_yaw)/10;cam_pitch+=(target_pitch-cam_pitch)/10;
+    cam_target_y=96;view_center_y=124;
+    view_sin=isin(cam_yaw);view_cos=icos(cam_yaw);
+    view_pitch_sin=cam_pitch;view_pitch_cos=SquareRoot0(1024*1024-cam_pitch*cam_pitch);
+    shake_x=shake_y=0;
+    if(impact_shake && !paused) {
+        shake_x=(ticks&1)?impact_shake:-impact_shake;shake_y=impact_shake/2;
+        impact_shake--;
+    }
+}
+static int text_width(const char *s) {int n=0;while(s[n])n++;return n*6-1;}
+static void fight_hud(void) {
+    const Character *pc=&roster[player.character],*cc=&roster[cpu.character];
+    hud_rect(0,0,320,46,9,13,20);
+    hud_rect(8,3,129,2,pc->short_r,pc->short_g,pc->short_b);
+    hud_rect(183,3,129,2,cc->short_r,cc->short_g,cc->short_b);
+    lettering(8,10,pc->name,1,231,235,235);
+    lettering(312-text_width(cc->name),10,cc->name,1,231,235,235);
+    menu_panel(143,4,34,33,1,191,48,61);
+    char clock[4];snprintf(clock,sizeof(clock),"%02d",clamp(round_frames/60,0,99));
+    lettering(149,12,clock,2,238,230,220);
+    center_text(38,"ROUND 1",1,148,167,181);
+    Fighter *f[2]={&player,&cpu};
+    for(int i=0;i<2;i++) {
+        int x=i?183:8,hp=f[i]->hp;
+        hud_rect(x,23,129,8,39,44,50);
+        hud_rect(x+1,24,hp*127/100,6,clamp(235-hp*2,40,235),50+hp*14/10,78);
+        for(int t=1;t<10;t++)hud_rect(x+t*13,24,1,6,32,42,48);
+        hud_rect(x,34,129,3,39,44,50);hud_rect(x,34,f[i]->stamina*129/100,3,205,174,99);
+    }
+    hud_rect(0,207,320,33,9,13,20);
+    hud_rect(8,205,304,1,56,72,89);
+}
+static void render(void) {
+    broadcast_camera();db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];
+    backdrop();arena();
+    const Character *pc=&roster[player.character],*cc=&roster[cpu.character];
+    fighter_draw(&player,pc->short_r,pc->short_g,pc->short_b);
+    fighter_draw(&cpu,cc->short_r,cc->short_g,cc->short_b);
+    fight_hud();
+    if(paused)FntPrint(font_bottom,"PAUSED - START RESUME  O ROSTER\nSELECT: CHANGE CAMERA");
+    else if(finished) {
+        const char *winner=player.hp==cpu.hp?"DRAW":(player.hp>cpu.hp?"YOU WIN":"CPU WINS");
+        FntPrint(font_bottom,"%s - %s\nX REMATCH  O FIGHTER SELECT",winner,(!player.hp||!cpu.hp)?"KNOCKOUT":"TIME UP");
+    } else FntPrint(font_bottom,"[] JAB /\\ POWER X BODY O HIGH KICK\nL1 HIGH GUARD L2 BODY GUARD START PAUSE");
+    DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);DrawOTag(ot[db]+OT_LEN-1);
+    FntFlush(font_top);FntFlush(font_bottom);
+}
+
 static void render_menu(void) {
     db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];depth_override=0;
+    backdrop();
     if(app_screen==SCREEN_CHARACTER) {
         /* A single live preview keeps selection within the PS1 polygon budget. */
-        cam_x=0;cam_z=0;cam_distance=700;cam_yaw=-180;
-        view_sin=isin(cam_yaw);view_cos=icos(cam_yaw);
-        Fighter preview={.x=135,.hp=100,.stamina=100,.facing=-1,.character=chosen_character};
+        cam_x=0;cam_z=0;cam_distance=700;set_view(-180,220,96);
+        Fighter preview={.x=135,.hp=100,.stamina=100,.facing=-1,.character=chosen_character,.face_x=1024};
         const Character *ch=&roster[chosen_character];
         depth_override=1023;
         face(vec(80,0,-60),vec(190,0,-60),vec(80,0,60),vec(190,0,60),36,49,61,256);
         depth_override=0;
         fighter_draw(&preview,ch->short_r,ch->short_g,ch->short_b);
         hud_rect(0,0,320,47,12,16,29);
-        center_text(13,"SELECT YOUR FIGHTER",2,234,204,139);
-        center_text(36,"FOUR FIGHTERS - BETA ROSTER",1,126,153,178);
+        center_text(13,"SELECT YOUR FIGHTER",2,230,232,230);
+        center_text(36,"FOUR FIGHTERS - BETA ROSTER",1,134,163,181);
         for(int i=0;i<4;i++) {
             const Character *card=&roster[i];
             menu_panel(9,52+i*32,166,29,i==chosen_character,card->short_r,card->short_g,card->short_b);
@@ -544,44 +767,105 @@ static void render_menu(void) {
         lettering(184,191,ch->name,1,238,215,168);
         FntPrint(font_bottom,"D-PAD CHOOSE   X/START FIGHT\nO BACK   4 PLAYABLE BETA FIGHTERS");
     } else if(app_screen==SCREEN_MODE) {
-        center_text(25,"SELECT MODE",3,234,204,139);
-        center_text(54,"UNLIMITED FIGHTING CHAMPS",1,126,153,178);
-        menu_panel(24,82,272,69,1,205,158,69);
-        center_text(94,"FIGHT NOW",3,244,231,202);
-        center_text(127,"EXHIBITION - PLAYER VS CPU",1,166,187,200);
-        center_text(168,"AVAILABLE IN THIS BETA",1,126,153,178);
+        hud_quad(0,0,238,0,0,208,162,208,11,17,27);
+        lettering(20,22,"SELECT MODE",3,235,237,234);
+        lettering(21,51,"BETA 0.5 - THE MAIN EVENT",1,132,156,175);
+        menu_panel(24,83,272,85,1,200,43,57);
+        lettering(39,94,"01",1,203,67,77);
+        lettering(39,112,"FIGHT NOW",3,244,239,232);
+        lettering(40,148,"EXHIBITION - PLAYER VS CPU",1,164,184,197);
         FntPrint(font_bottom,"X/START SELECT FIGHT NOW\nO BACK TO TITLE");
     } else {
-        const int px[8]={84,236,302,302,236,84,18,18};
-        const int py[8]={11,11,57,160,201,201,160,57};
-        for(int i=0;i<8;i++)menu_line(px[i],py[i],px[(i+1)%8],py[(i+1)%8],61,74,92);
-        hud_rect(0,218,320,22,9,12,22);
-        center_text(29,"UNLIMITED",3,222,224,220);
-        center_text(61,"FIGHTING",4,238,202,123);
-        center_text(100,"CHAMPS",4,238,202,123);
-        hud_rect(86,137,148,2,174,130,55);
-        center_text(149,"BETA 0.4",1,126,153,178);
-        int glow=190+isin(menu_ticks*45)*50/4096;
-        center_text(175,"PRESS START",2,glow,glow,glow);
-        FntPrint(font_bottom,"    FOUR FIGHTERS. ONE OCTAGON.\n      FICTIONAL PARODY ROSTER");
+        cam_x=0;cam_z=0;cam_distance=560;set_view(-90,210,100);
+        arena();
+        Fighter hero={.x=132,.hp=100,.stamina=100,.facing=-1,.character=0,.face_x=1024};
+        int phase=menu_ticks%140;
+        if(phase<28){hero.attack=2;hero.age=phase;}else hero.guard=1;
+        fighter_draw(&hero,roster[0].short_r,roster[0].short_g,roster[0].short_b);
+        hud_quad(0,0,202,0,0,208,171,208,8,12,19);
+        hud_quad(194,0,201,0,163,208,170,208,123,32,46);
+        hud_rect(18,19,23,3,205,46,60);
+        lettering(48,17,"MAIN EVENT BETA",1,157,180,196);
+        lettering(18,53,"UNLIMITED",2,240,240,233);
+        lettering(18,79,"FIGHTING",3,240,240,233);
+        lettering(18,108,"CHAMPS",3,219,54,67);
+        lettering(19,140,"FOUR FIGHTERS. ONE OCTAGON.",1,139,161,178);
+        int glow=170+isin(menu_ticks*35)*45/4096;
+        menu_panel(18,162,153,31,1,glow,45,57);
+        lettering(29,171,"PRESS START",2,244,239,232);
+        hud_rect(0,207,320,33,9,13,20);hud_rect(18,207,284,1,53,72,89);
+        FntPrint(font_bottom,"BETA 0.5     UNLIMITED FIGHTING CHAMPS\n      FOUR-FIGHTER SHOWCASE");
     }
     DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);
     DrawOTag(ot[db]+OT_LEN-1);FntFlush(font_menu);FntFlush(font_bottom);
+}
+
+/* Original music is uploaded once to SPU RAM, then played only during walkouts. */
+extern const uint8_t walkout_music[];
+static int music_phase=-1;
+static void audio_init(void) {
+    SpuInit();SpuSetCommonMasterVolume(0x2400,0x2400);
+    SpuSetTransferMode(SPU_TRANSFER_BY_DMA);SpuSetTransferStartAddr(0x1010);
+    SpuWrite((const uint32_t *)walkout_music,WALKOUT_MUSIC_BYTES);
+    SpuIsTransferCompleted(SPU_TRANSFER_WAIT);
+}
+static void audio_tick(void) {
+    if(app_screen!=SCREEN_WALKOUT) {
+        if(music_phase>=0){(void)SpuSetKey(0,1);music_phase=-1;}
+        return;
+    }
+    if(music_phase!=walkout_phase) {
+        (void)SpuSetKey(0,1);
+        SPU_CH_FREQ(0)=getSPUSampleRate(WALKOUT_MUSIC_RATE);
+        SPU_CH_ADDR(0)=getSPUAddr(0x1010);SPU_CH_LOOP_ADDR(0)=getSPUAddr(0x1010);
+        SPU_CH_ADSR1(0)=0x00ff;SPU_CH_ADSR2(0)=0x0000;
+        (void)SpuSetKey(1,1);music_phase=walkout_phase;
+    }
+    int volume=0x2600;
+    if(walkout_frame<12)volume=volume*(walkout_frame+1)/12;
+    if(walkout_frame>WALKOUT_FRAMES-40)volume=volume*(WALKOUT_FRAMES-walkout_frame)/40;
+    SpuSetVoiceVolume(0,volume,volume);
+}
+static void render_walkout(void) {
+    int time=clamp(walkout_frame,0,WALKOUT_FRAMES);
+    Fighter actor=walkout_phase?cpu:player;
+    actor.z=420-time*270/WALKOUT_FRAMES;
+    actor.x=time<255?0:(walkout_phase?1:-1)*(time-255)*90/45;
+    actor.elevation=actor.z>200?(actor.z-200)*15/275:0;
+    actor.walk=time*165;actor.facing=1;actor.face_x=0;actor.face_z=-1024;
+    actor.guard=0;actor.attack=0;
+    cam_x=actor.x+18;cam_z=actor.z;cam_distance=560;
+    set_view(75+isin(time*4)*65/4096,190,103);
+    db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];backdrop();arena();
+    const Character *ch=&roster[actor.character];
+    fighter_draw(&actor,ch->short_r,ch->short_g,ch->short_b);
+    hud_rect(0,0,320,40,9,13,20);
+    lettering(17,10,"THE WALKOUT",2,235,237,234);
+    lettering(18,29,walkout_phase?"CPU ENTRANCE - 02 OF 02":"PLAYER ENTRANCE - 01 OF 02",1,145,171,190);
+    menu_panel(15,173,290,32,1,ch->short_r,ch->short_g,ch->short_b);
+    lettering(26,183,ch->name,2,239,234,226);
+    hud_rect(15,207,time*290/WALKOUT_FRAMES,2,196,53,66);
+    FntPrint(font_bottom,"START SKIP TO NEXT ENTRANCE/FIGHT\nORIGINAL MUSIC: MAIN EVENT PULSE");
+    DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);DrawOTag(ot[db]+OT_LEN-1);
+    FntFlush(font_bottom);
 }
 
 int main(void) {
     ResetGraph(0);InitGeom();SetVideoMode(MODE_NTSC);
     SetDefDispEnv(&disp[0],0,0,W,H);SetDefDrawEnv(&draw[0],0,H,W,H);
     SetDefDispEnv(&disp[1],0,H,W,H);SetDefDrawEnv(&draw[1],0,0,W,H);
-    draw[0].isbg=draw[1].isbg=1;setRGB0(&draw[0],12,16,29);setRGB0(&draw[1],12,16,29);
+    draw[0].isbg=draw[1].isbg=1;draw[0].dtd=draw[1].dtd=1;setRGB0(&draw[0],12,16,29);setRGB0(&draw[1],12,16,29);
     FntLoad(960,0);font_top=FntOpen(8,6,304,24,0,100);font_bottom=FntOpen(8,211,304,25,0,110);
     font_menu=FntOpen(18,56,288,144,0,400);
     InitPAD(pad1,sizeof(pad1),pad2,sizeof(pad2));StartPAD();ChangeClearPAD(0);
-    SetDispMask(1);reset_match();
+    audio_init();SetDispMask(1);reset_match();
     while(1) {
-        uint16_t p=pad_buttons();if((p&PAD_SELECT)&&!(previous_pad&PAD_SELECT))camera_side=!camera_side;
-        app_tick(p);
-        if(app_screen==SCREEN_FIGHT)render();else render_menu();
+        uint16_t p=pad_buttons();
+        if(app_screen==SCREEN_FIGHT && (p&PAD_SELECT) && !(menu_previous&PAD_SELECT))camera_side=(camera_side+1)%3;
+        app_tick(p);audio_tick();
+        if(app_screen==SCREEN_FIGHT)render();
+        else if(app_screen==SCREEN_WALKOUT)render_walkout();
+        else render_menu();
     }
 }
 #endif

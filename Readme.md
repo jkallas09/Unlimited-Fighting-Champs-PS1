@@ -1,28 +1,44 @@
-# Unlimited Fighting Champs — PS1 beta v0.4
+# Unlimited Fighting Champs — PS1 beta v0.5
 
 Original PlayStation homebrew combat game built with PSn00bSDK v0.24.
 
-## What changed in beta v0.4
+## What changed in beta v0.5
 
-The game now boots into a title screen. Press **Start** to open the mode menu, select **Fight Now**, then choose one of four fighters before the match begins.
+### Arena and presentation
 
-| Playable fighter | Nickname | Appearance |
-| --- | --- | --- |
-| Conor McSnack | The Notoriously Hungry | Green shorts, auburn hair and beard, lean build |
-| Jon Boneless | Bones? What Bones? | Purple shorts, dark cropped hair, taller build |
-| Brock Lunchner | The Lunch Break | Red shorts, blond buzz cut, heavyweight build |
-| Chuck Liddoodle | The Iced Latte | Blue shorts, dark mohawk and beard |
+- Rebuilt the setting with a lit, subdivided canvas, mat branding, padded cage posts, diamond mesh, audience terraces, an entrance tunnel, colored light strips and arena lighting.
+- Corrected the perspective camera's floor projection. The camera now follows the action, adjusts its distance and has three presets: broadcast, diagonal and ringside. Press **Select** to cycle them.
+- Camera-side cage panels are hidden to keep the fighters visible.
+- Redesigned the title screen with red/white sports graphics, a live 3D fighter and arena backdrop. The fight HUD now has named fighter panels, a central timer and segmented health bars.
 
-These are fictional comic parody names. All four are selectable and playable against a different randomly chosen CPU opponent. Combat rules are shared in this beta; their current differences are appearance and proportions.
+### Fight physics
 
-- Added title, mode select and character select screens with a live 3D preview.
-- Start advances from the title; X or Start confirms menu choices.
-- D-pad cycles through all four fighters; Circle goes back.
-- Held buttons cannot skip through multiple screens.
-- Pause a match, then press Circle to return to character select. After a result, wait for the short delay, then use Cross to rematch or Circle to choose another fighter.
-- The match HUD displays the selected fighter names.
+- Added acceleration, momentum, deceleration and circular body separation.
+- Fighters turn toward each other in 3D; attack direction locks after the initial wind-up so sidesteps can evade strikes.
+- Hits have an active window, one-hit-per-attack protection, recoil impulses, brief hit-stun and hit-stop. A hit can interrupt an opponent's wind-up.
+- High and body guards cover different attacks and only defend from the front. Blocking consumes stamina; an exhausted guard can break.
+- Attacks at the edge of reach and attacks thrown with low stamina do less damage. Guarding, attacking and fatigue affect movement.
 
-Only **Fight Now** is enabled in this beta. There is no career, tournament, multiplayer, music, sound, grappling or submissions yet. v0.3 was confirmed running by the user in emulation. v0.4 has automated menu/combat tests, visual inspection of software previews, compilation and disc validation; its new screens still need an emulator check.
+These are grounded arcade combat rules, not a full rigid-body or ragdoll simulation. Grappling and submissions are not implemented yet.
+
+### Fighter walkouts and original music
+
+After selecting a character, both fighters get an entrance sequence with a tracking camera and name card. **Start** skips to the next entrance, then the fight. The entrances also finish automatically.
+
+The walkout theme, **Main Event Pulse**, is an original eight-second synth/bass/drum composition generated for this project. It uses no third-party recordings, samples or melody references. The game uploads the ADPCM track to PS1 SPU RAM and plays/fades it during the walkouts. `compose_music.py` regenerates the track, the SPU asset and a decoded WAV preview with Python 3.
+
+### Four playable beta fighters
+
+| Fighter | Nickname |
+| --- | --- |
+| Conor McSnack | The Notoriously Hungry |
+| Jon Boneless | Bones? What Bones? |
+| Brock Lunchner | The Lunch Break |
+| Chuck Liddoodle | The Iced Latte |
+
+They are fictional comic parody characters. Their beta differences are appearance and proportions; combat rules are shared. Fight Now is the available mode.
+
+v0.5 has menu, walkout and physics regression tests, software render inspection, PS1 compilation and disc validation. Actual emulator performance, the new camera angles and SPU audio still need checking. There is no career, tournament, multiplayer, grappling or submissions yet.
 
 ## Download and play
 
@@ -31,20 +47,22 @@ Open **Actions**, select the latest successful **Build PS1 BIN-CUE** run, and do
 ## Controls
 
 | Button | Action |
+| --- | --- |
 | Start on title | Open mode select |
 | X / Start in menus | Confirm choice |
 | D-pad in character select | Choose fighter |
 | Circle in menus | Back |
-| --- | --- |
-| D-pad left/right | Move across the arena |
-| D-pad up/down | Move into/out of the arena |
+| Start during walkouts | Skip to next entrance / fight |
+| D-pad | Move around the arena |
 | Square | Jab |
 | Triangle | Power punch |
-| Cross | Kick / rematch after result delay |
-| Circle | Heavy kick |
-| L1 or L2 | Guard |
-| Start | Pause / resume |
-| Select | Change camera angle |
+| Cross | Body kick / rematch after result delay |
+| Circle | High kick |
+| L1 | High guard |
+| L2 | Body guard |
+| Start in a match | Pause / resume |
+| Circle while paused | Return to character select |
+| Select | Cycle broadcast / diagonal / ringside camera |
 
 The selected fighter is the player; the other fighter is the CPU. Green bars show health; gold bars show stamina. Fights last 90 seconds or end with a knockout. Higher remaining health wins at the time limit.
 
@@ -65,7 +83,7 @@ cc -std=c99 -O2 combat_test.c -o combat_test
 ./combat_test
 ```
 
-These also cover title/mode/roster navigation, input latching, all four playable selections, distinct CPU picks, back navigation and rematches. Combat checks cover contact timing, one hit per attack, guard reduction, insufficient stamina, depth misses, knockout falls, rematch, pause and 15,000 randomized simulation frames.
+These also cover title/mode/roster navigation, input latching, all four playable selections, distinct CPU picks, automatic and skipped walkouts, back navigation and rematches. Physics checks include momentum, radial collision, guard coverage/direction, recoil, stun, guard breaks and late active-frame hits. Combat checks cover contact timing, one hit per attack, guard reduction, insufficient stamina, depth misses, knockout falls, rematch, pause and 15,000 randomized simulation frames.
 
 ## Source
 
