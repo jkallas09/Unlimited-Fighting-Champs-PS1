@@ -1,0 +1,46 @@
+name: Build PS1 BIN-CUE
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PSn00bSDK v0.24
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tools
+          curl -fL --retry 3 https://github.com/Lameguy64/PSn00bSDK/releases/download/v0.24/PSn00bSDK-0.24-Linux.zip -o .tools/sdk.zip
+          echo "5ada7c9478d795b22bde96ee23d6869290c14a740bcde3d57c01c342a26ded35  .tools/sdk.zip" | sha256sum -c -
+          unzip -q .tools/sdk.zip -d .tools
+          chmod -R u+rx .tools/PSn00bSDK-0.24-Linux/bin
+          echo "$GITHUB_WORKSPACE/.tools/PSn00bSDK-0.24-Linux/bin" >> "$GITHUB_PATH"
+          echo "PSN00BSDK_LIBS=$GITHUB_WORKSPACE/.tools/PSn00bSDK-0.24-Linux/lib/libpsn00b" >> "$GITHUB_ENV"
+      - name: Compile and verify disc
+        run: bash build_disc.sh
+      - name: Record checksums
+        run: cd output && sha256sum *.bin *.cue *.exe > SHA256SUMS.txt
+      - name: Upload playable disc
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unlimited-Fighting-Champs-PS1
+          path: output/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/CMakeFiles/CMakeError.log
+          if-no-files-found: ignore
