@@ -1,17 +1,17 @@
-# Unlimited Fighting Champs — PS1 3D prototype v0.2
+# Unlimited Fighting Champs — PS1 3D prototype v0.3
 
 Original PlayStation homebrew combat game built with PSn00bSDK v0.24.
 
-## What changed in v0.2
+## What changed in v0.3
 
-- Replaced the rectangle fighters with articulated, flat-shaded polygon models: tapered torsos, octagonal heads, arms, gloves, shorts, legs and feet.
-- Added an eight-sided 3D arena with mat markings, posts, three rails and audience silhouettes.
-- Added a perspective tracking camera with automatic distance adjustment and two selectable angles.
-- Added walk cycles, punch extensions, raised kicks, guard poses, hit flashes and knockout falls.
-- Strikes now land at the contact frame of their animation and can miss if the opponent moves away.
-- Added body separation, pause, winner messages and knockout/time-limit results.
+- Replaced cuboid body parts with anatomical meshes: tapered thighs and calves, biceps and forearms, rounded shoulders, pectorals, a narrower waist and a shaped rib cage.
+- Added Gouraud vertex lighting so muscles and faces shade smoothly instead of showing only flat box faces.
+- Rebuilt the heads with chin/jaw/cheek/skull profiles, noses, ears, eye sockets, eyebrows, mouth lines, hair and a beard on the red fighter.
+- Added bare feet, shaped toes, rounded fingerless MMA gloves, colored wrist wraps and fitted shorts.
+- Refined adult body proportions, guard positions, breathing motion and eased strike animation.
+- Increased depth precision for facial details, cached camera trigonometry, and culled hidden model faces.
 
-This remains a deliberately simple early 3D prototype. There are no textures, music, sound effects, grappling, submissions, character selection or finished fighter animations yet. v0.1 was confirmed working by the user in emulation. v0.2 has compile/disc validation, host combat simulation tests and a software preview of the same polygon draw commands; its emulator gameplay and performance still need testing.
+The characters are more detailed PS1-style models, still an early prototype. They are not photorealistic, and there are no textures, music, sound effects, grappling, submissions or character selection yet. v0.2 was confirmed working by the user in emulation. v0.3 has compile/disc validation, combat simulation checks and inspection of software previews of its polygon draw commands. Its actual emulator appearance and frame rate still need testing.
 
 ## Download and play
 
@@ -35,7 +35,7 @@ Blue is the player; red is the CPU. Green bars show health; gold bars show stami
 
 ## Build locally
 
-Install CMake 3.21+, Python 3 and the official PSn00bSDK v0.24 Linux release. Put the SDK `bin` folder on PATH and set `PSN00BSDK_LIBS` to its absolute `lib/libpsn00b` path, then run:
+Install a host C compiler, CMake 3.21+, Python 3 and the official PSn00bSDK v0.24 Linux release. Put the SDK `bin` folder on PATH and set `PSN00BSDK_LIBS` to its absolute `lib/libpsn00b` path, then run:
 
 ```sh
 bash build_disc.sh
