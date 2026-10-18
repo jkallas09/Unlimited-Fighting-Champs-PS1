@@ -26,5 +26,33 @@ int main(void) {
         assert(absi(player.x)<=230 && absi(player.z)<=145);
         assert(absi(player.x)+absi(player.z)<=320);
     }
+    /* Title -> mode -> roster, including input latching and back navigation. */
+    app_screen=SCREEN_TITLE;chosen_character=0;menu_previous=previous_pad=0;
+    reset_match();time=round_frames;
+    for(int i=0;i<120;i++)app_tick(0);
+    assert(app_screen==SCREEN_TITLE && round_frames==time);
+    app_tick(PAD_START);assert(app_screen==SCREEN_MODE);
+    for(int i=0;i<30;i++)app_tick(PAD_START);
+    assert(app_screen==SCREEN_MODE);
+    app_tick(0);app_tick(PAD_CROSS);assert(app_screen==SCREEN_CHARACTER);
+    app_tick(PAD_CROSS);assert(app_screen==SCREEN_CHARACTER);
+    app_tick(0);app_tick(PAD_LEFT);assert(chosen_character==3);
+    app_tick(0);app_tick(PAD_RIGHT);assert(chosen_character==0);
+    app_tick(0);app_tick(PAD_CIRCLE);assert(app_screen==SCREEN_MODE);
+    app_tick(0);app_tick(PAD_CIRCLE);assert(app_screen==SCREEN_TITLE);
+    for(int id=0;id<4;id++) {
+        app_screen=SCREEN_CHARACTER;chosen_character=id;menu_previous=0;
+        app_tick(PAD_START);assert(app_screen==SCREEN_FIGHT);
+        assert(player.character==id && cpu.character!=id && cpu.character>=0 && cpu.character<4);
+        app_tick(PAD_START);assert(!paused && round_frames==60*90-1);
+        app_tick(0);app_tick(PAD_START);assert(paused);
+        app_tick(0);app_tick(PAD_CIRCLE);assert(app_screen==SCREEN_CHARACTER && !paused);
+        app_tick(0);app_tick(PAD_CROSS);assert(app_screen==SCREEN_FIGHT && player.character==id);
+        finished=1;restart_delay=0;app_tick(0);app_tick(PAD_CROSS);
+        assert(!finished && player.character==id);
+        finished=1;restart_delay=0;app_tick(0);app_tick(PAD_CIRCLE);
+        assert(app_screen==SCREEN_CHARACTER);
+    }
+    puts("PASS: title/mode/roster navigation, held-button latching, wraparound, all 4 playable characters, distinct CPU picks, pause/back and rematch");
     puts("PASS: attack timing, one hit per attack, guard, stamina, depth misses, knockout, rematch, pause and 15000 simulation frames");
 }

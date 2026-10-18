@@ -1,4 +1,4 @@
-/* Unlimited Fighting Champs 0.3 - original polygonal PS1 combat prototype.
+/* Unlimited Fighting Champs 0.4 - original polygonal PS1 combat prototype.
  * Integer-only perspective renderer; no commercial meshes or textures.
  */
 #include <stdint.h>
@@ -26,8 +26,23 @@
 
 typedef struct {
     int x,z,hp,stamina,facing,guard,flash;
-    int attack,age,walk,fall;
+    int attack,age,walk,fall,character;
 } Fighter;
+typedef struct {
+    const char *name,*nickname;
+    int skin_r,skin_g,skin_b,short_r,short_g,short_b;
+    int hair_r,hair_g,hair_b,bulk,height,beard,hair_style;
+} Character;
+static const Character roster[4]={
+    {"CONOR MCSNACK","THE NOTORIOUSLY HUNGRY",211,162,125,26,146,86,115,56,25,0,100,1,0},
+    {"JON BONELESS","BONES? WHAT BONES?",151,101,76,112,70,171,27,23,23,1,106,1,1},
+    {"BROCK LUNCHNER","THE LUNCH BREAK",221,176,139,176,45,39,166,123,64,5,108,0,2},
+    {"CHUCK LIDDOODLE","THE ICED LATTE",198,145,111,42,99,195,43,29,24,2,99,1,3}
+};
+enum {SCREEN_TITLE,SCREEN_MODE,SCREEN_CHARACTER,SCREEN_FIGHT};
+static int app_screen=SCREEN_TITLE,chosen_character,opponent_character=1,menu_ticks;
+static uint16_t menu_previous;
+
 static Fighter player,cpu;
 static int round_frames,finished,restart_delay,paused,ticks;
 static uint16_t previous_pad;
@@ -40,8 +55,8 @@ static const int contact[5]={0,7,12,10,15};
 static const int power[5]={0,6,13,9,17};
 static const int reach[5]={0,81,92,102,113};
 static void reset_match(void) {
-    player=(Fighter){.x=-100,.z=0,.hp=100,.stamina=100,.facing=1};
-    cpu=(Fighter){.x=100,.z=0,.hp=100,.stamina=100,.facing=-1};
+    player=(Fighter){.x=-100,.z=0,.hp=100,.stamina=100,.facing=1,.character=chosen_character};
+    cpu=(Fighter){.x=100,.z=0,.hp=100,.stamina=100,.facing=-1,.character=opponent_character};
     round_frames=60*90;finished=0;restart_delay=0;paused=0;
 }
 static void boundary(Fighter *f) {
@@ -117,6 +132,33 @@ static void game_tick(uint16_t p) {
     if(!finished) animate_and_hit(&cpu,&player);
 }
 
+/* Menu input uses press edges: holding Start cannot skip multiple screens. */
+static void app_tick(uint16_t p) {
+    uint16_t pressed=p & ~menu_previous;
+    menu_previous=p;
+    if(app_screen==SCREEN_FIGHT) {
+        if((paused || (finished && !restart_delay)) && (pressed&PAD_CIRCLE)) {
+            app_screen=SCREEN_CHARACTER;paused=0;previous_pad=p;return;
+        }
+        game_tick(p);return;
+    }
+    menu_ticks++;ticks++;
+    if(app_screen==SCREEN_TITLE) {
+        if(pressed&PAD_START)app_screen=SCREEN_MODE;
+    } else if(app_screen==SCREEN_MODE) {
+        if(pressed&PAD_CIRCLE)app_screen=SCREEN_TITLE;
+        else if(pressed&(PAD_START|PAD_CROSS))app_screen=SCREEN_CHARACTER;
+    } else if(app_screen==SCREEN_CHARACTER) {
+        if(pressed&PAD_CIRCLE){app_screen=SCREEN_MODE;return;}
+        if(pressed&(PAD_RIGHT|PAD_DOWN))chosen_character=(chosen_character+1)%4;
+        else if(pressed&(PAD_LEFT|PAD_UP))chosen_character=(chosen_character+3)%4;
+        if(pressed&(PAD_START|PAD_CROSS)) {
+            opponent_character=(chosen_character+1+(int)(rnd()%3))%4;
+            reset_match();previous_pad=p;app_screen=SCREEN_FIGHT;
+        }
+    }
+}
+
 #ifndef HOST_TEST
 #define W 320
 #define H 240
@@ -125,7 +167,7 @@ static void game_tick(uint16_t p) {
 static DISPENV disp[2];static DRAWENV draw[2];
 static uint32_t ot[2][OT_LEN],packet[2][PACKETS/4];
 static uint8_t pad1[34],pad2[34];
-static int db,cursor,font_top,font_bottom,cam_x,cam_z,cam_distance=790,cam_yaw=-180;
+static int db,cursor,font_top,font_bottom,font_menu,cam_x,cam_z,cam_distance=790,cam_yaw=-180;
 static int camera_side;
 static int view_sin,view_cos;
 static void *hud_tail;
@@ -182,6 +224,7 @@ static Vec body_vertex(Fighter *f,Vec p) {
     /* Collapse the articulated model sideways on a knockout. */
     int oldy=p.y;
     p.x+=oldy*f->fall/20;p.y=oldy*(18-f->fall)/18+f->fall/2;
+    p.y=p.y*roster[f->character].height/100;
     return vec(f->x+p.x*f->facing,p.y,f->z+p.z);
 }
 /* Anatomical lofts share projected vertices and use Gouraud lighting. */
@@ -264,11 +307,18 @@ static void detailed_head(Fighter *f,int lean,int bob,int sr,int sg,int sb) {
         {13,10,9,0},{18,9,8,-1},{21,6,5,-1},{23,0,0,-1}};
     loft(f,lean,152+bob,0,skull,7,sr,sg,sb);
     const Ring hair[4]={{0,9,9,-1},{4,8,8,-1},{7,5,5,-1},{9,0,0,-1}};
-    int hr=f==&cpu?44:55,hg=f==&cpu?29:37,hb=27;
-    loft(f,lean,168+bob,0,hair,4,hr,hg,hb);
-    if(f==&cpu) {
+    const Character *ch=&roster[f->character];
+    int hr=ch->hair_r,hg=ch->hair_g,hb=ch->hair_b;
+    if(ch->hair_style==3) {
+        const Ring mohawk[4]={{0,9,3,0},{5,9,3,0},{11,5,2,-1},{13,0,0,-2}};
+        loft(f,lean,168+bob,0,mohawk,4,hr,hg,hb);
+    } else if(ch->hair_style==2) {
+        const Ring buzz[3]={{0,9,8,-1},{5,6,5,-1},{7,0,0,-1}};
+        loft(f,lean,169+bob,0,buzz,3,hr,hg,hb);
+    } else loft(f,lean,168+bob,0,hair,4,hr,hg,hb);
+    if(ch->beard) {
         const Ring beard[3]={{0,7,6,2},{3,9,8,1},{6,9,8,1}};
-        loft(f,lean,149+bob,0,beard,3,65,42,32);
+        loft(f,lean,149+bob,0,beard,3,hr,hg,hb);
     }
     for(int side=-1;side<=1;side+=2) {
         oval(f,lean-1,162+bob,side*9,3,5,2,sr-12,sg-12,sb-10);
@@ -301,9 +351,10 @@ static void fighter_draw(Fighter *f,int red,int green,int blue) {
     }
     int step=isin(f->walk)*7/4096,bob=isin(ticks*62)/2048;
     int lean=3+(f->attack==2?pulse*10/256:0);
-    int sr=f==&cpu?166:211,sg=f==&cpu?115:162,sb=f==&cpu?86:125;
+    const Character *ch=&roster[f->character];
+    int sr=ch->skin_r,sg=ch->skin_g,sb=ch->skin_b;
     if(f->flash){sr=249;sg=221;sb=185;}
-    int broad=f==&cpu?2:0;
+    int broad=ch->bulk;
     /* Adult proportions: long legs, narrow waist, broad upper chest, smaller head. */
     Vec hip[2]={vec(-2,85,-12),vec(3,85,12)};
     Vec knee[2]={vec(-12+step,46,-16),vec(15-step,47,15)};
@@ -405,30 +456,132 @@ static void render(void) {
     cam_distance+=(target-cam_distance)/8;cam_yaw+=((camera_side?180:-180)-cam_yaw)/8;
     view_sin=isin(cam_yaw);view_cos=icos(cam_yaw);
     db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];
-    arena();fighter_draw(&player,43,111,216);fighter_draw(&cpu,210,53,52);
+    arena();
+    const Character *pc=&roster[player.character],*cc=&roster[cpu.character];
+    fighter_draw(&player,pc->short_r,pc->short_g,pc->short_b);
+    fighter_draw(&cpu,cc->short_r,cc->short_g,cc->short_b);
     hud_rect(8,31,142,10,49,26,32);hud_rect(170,31,142,10,49,26,32);
     hud_rect(9,32,player.hp*140/100,8,60,190,119);hud_rect(171,32,cpu.hp*140/100,8,60,190,119);
     hud_rect(9,44,player.stamina*140/100,3,237,189,61);hud_rect(171,44,cpu.stamina*140/100,3,237,189,61);
-    FntPrint(font_top,"UNLIMITED FIGHTING CHAMPS  3D v0.3\nBLUE: YOU      %02d      RED: CPU",round_frames/60);
-    if(paused) FntPrint(font_bottom,"PAUSED - START TO RESUME\nSELECT: CAMERA");
+    FntPrint(font_top,"UNLIMITED FIGHTING CHAMPS   %02d\n%s VS %s",round_frames/60,pc->name,cc->name);
+    if(paused) FntPrint(font_bottom,"PAUSED - START TO RESUME\nO: FIGHTER SELECT  SELECT: CAMERA");
     else if(finished) {
-        const char *winner=player.hp==cpu.hp?"DRAW":(player.hp>cpu.hp?"BLUE WINS":"RED WINS");
-        FntPrint(font_bottom,"%s - %s\nPRESS X TO REMATCH",winner,(!player.hp||!cpu.hp)?"KNOCKOUT":"TIME UP");
+        const char *winner=player.hp==cpu.hp?"DRAW":(player.hp>cpu.hp?"YOU WIN":"CPU WINS");
+        FntPrint(font_bottom,"%s - %s\nX REMATCH  O FIGHTER SELECT",winner,(!player.hp||!cpu.hp)?"KNOCKOUT":"TIME UP");
     } else FntPrint(font_bottom,"[] JAB /\\ POWER X KICK O HEAVY\nL1/L2 GUARD  START PAUSE  SELECT CAM");
     DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);
     DrawOTag(ot[db]+OT_LEN-1);FntFlush(font_top);FntFlush(font_bottom);
 }
+/* Compact display lettering; horizontal runs reduce GPU packet usage. */
+static const uint8_t alphabet[36][7]={
+ {14,17,17,31,17,17,17},{30,17,17,30,17,17,30},{14,17,16,16,16,17,14},
+ {30,17,17,17,17,17,30},{31,16,16,30,16,16,31},{31,16,16,30,16,16,16},
+ {14,17,16,23,17,17,15},{17,17,17,31,17,17,17},{31,4,4,4,4,4,31},
+ {7,2,2,2,18,18,12},{17,18,20,24,20,18,17},{16,16,16,16,16,16,31},
+ {17,27,21,21,17,17,17},{17,25,21,19,17,17,17},{14,17,17,17,17,17,14},
+ {30,17,17,30,16,16,16},{14,17,17,17,21,18,13},{30,17,17,30,20,18,17},
+ {15,16,16,14,1,1,30},{31,4,4,4,4,4,4},{17,17,17,17,17,17,14},
+ {17,17,17,17,17,10,4},{17,17,17,21,21,21,10},{17,17,10,4,10,17,17},
+ {17,17,10,4,4,4,4},{31,1,2,4,8,16,31},
+ {14,17,19,21,25,17,14},{4,12,4,4,4,4,14},{14,17,1,2,4,8,31},
+ {30,1,1,14,1,1,30},{2,6,10,18,31,2,2},{31,16,16,30,1,1,30},
+ {14,16,16,30,17,17,14},{31,1,2,4,8,8,8},{14,17,17,14,17,17,14},
+ {14,17,17,15,1,1,14}
+};
+static void lettering(int x,int y,const char *text,int scale,int r,int g,int b) {
+    for(;*text;text++,x+=6*scale) {
+        int glyph=-1;char c=*text;
+        if(c>='A'&&c<='Z')glyph=c-'A';
+        else if(c>='0'&&c<='9')glyph=26+c-'0';
+        if(glyph<0) {
+            if(c=='.')hud_rect(x+2*scale,y+6*scale,scale,scale,r,g,b);
+            if(c=='-')hud_rect(x,y+3*scale,5*scale,scale,r,g,b);
+            continue;
+        }
+        for(int row=0;row<7;row++) {
+            int bits=alphabet[glyph][row];
+            for(int col=0;col<5;) {
+                if(!(bits&(16>>col))){col++;continue;}
+                int start=col;while(col<5&&(bits&(16>>col)))col++;
+                hud_rect(x+start*scale,y+row*scale,(col-start)*scale,scale,r,g,b);
+            }
+        }
+    }
+}
+static void center_text(int y,const char *text,int scale,int r,int g,int b) {
+    int n=0;while(text[n])n++;
+    lettering((W-(n*6-1)*scale)/2,y,text,scale,r,g,b);
+}
+static void menu_line(int x,int y,int xx,int yy,int r,int g,int b) {
+    LINE_F2 *p=alloc_prim(sizeof(LINE_F2));if(!p)return;
+    setLineF2(p);setRGB0(p,r,g,b);setXY2(p,x,y,xx,yy);addPrim(hud_tail,p);hud_tail=p;
+}
+static void menu_panel(int x,int y,int w,int h,int selected,int r,int g,int b) {
+    hud_rect(x,y,w,h,selected?r:43,selected?g:52,selected?b:68);
+    hud_rect(x+2,y+2,w-4,h-4,selected?31:18,selected?40:24,selected?51:35);
+    if(selected)hud_rect(x+4,y+4,3,h-8,r,g,b);
+}
+static void render_menu(void) {
+    db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];depth_override=0;
+    if(app_screen==SCREEN_CHARACTER) {
+        /* A single live preview keeps selection within the PS1 polygon budget. */
+        cam_x=0;cam_z=0;cam_distance=700;cam_yaw=-180;
+        view_sin=isin(cam_yaw);view_cos=icos(cam_yaw);
+        Fighter preview={.x=135,.hp=100,.stamina=100,.facing=-1,.character=chosen_character};
+        const Character *ch=&roster[chosen_character];
+        depth_override=1023;
+        face(vec(80,0,-60),vec(190,0,-60),vec(80,0,60),vec(190,0,60),36,49,61,256);
+        depth_override=0;
+        fighter_draw(&preview,ch->short_r,ch->short_g,ch->short_b);
+        hud_rect(0,0,320,47,12,16,29);
+        center_text(13,"SELECT YOUR FIGHTER",2,234,204,139);
+        center_text(36,"FOUR FIGHTERS - BETA ROSTER",1,126,153,178);
+        for(int i=0;i<4;i++) {
+            const Character *card=&roster[i];
+            menu_panel(9,52+i*32,166,29,i==chosen_character,card->short_r,card->short_g,card->short_b);
+            FntPrint(font_menu,"%s\n%.18s\n\n\n",card->name,card->nickname);
+        }
+        lettering(184,191,ch->name,1,238,215,168);
+        FntPrint(font_bottom,"D-PAD CHOOSE   X/START FIGHT\nO BACK   4 PLAYABLE BETA FIGHTERS");
+    } else if(app_screen==SCREEN_MODE) {
+        center_text(25,"SELECT MODE",3,234,204,139);
+        center_text(54,"UNLIMITED FIGHTING CHAMPS",1,126,153,178);
+        menu_panel(24,82,272,69,1,205,158,69);
+        center_text(94,"FIGHT NOW",3,244,231,202);
+        center_text(127,"EXHIBITION - PLAYER VS CPU",1,166,187,200);
+        center_text(168,"AVAILABLE IN THIS BETA",1,126,153,178);
+        FntPrint(font_bottom,"X/START SELECT FIGHT NOW\nO BACK TO TITLE");
+    } else {
+        const int px[8]={84,236,302,302,236,84,18,18};
+        const int py[8]={11,11,57,160,201,201,160,57};
+        for(int i=0;i<8;i++)menu_line(px[i],py[i],px[(i+1)%8],py[(i+1)%8],61,74,92);
+        hud_rect(0,218,320,22,9,12,22);
+        center_text(29,"UNLIMITED",3,222,224,220);
+        center_text(61,"FIGHTING",4,238,202,123);
+        center_text(100,"CHAMPS",4,238,202,123);
+        hud_rect(86,137,148,2,174,130,55);
+        center_text(149,"BETA 0.4",1,126,153,178);
+        int glow=190+isin(menu_ticks*45)*50/4096;
+        center_text(175,"PRESS START",2,glow,glow,glow);
+        FntPrint(font_bottom,"    FOUR FIGHTERS. ONE OCTAGON.\n      FICTIONAL PARODY ROSTER");
+    }
+    DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);
+    DrawOTag(ot[db]+OT_LEN-1);FntFlush(font_menu);FntFlush(font_bottom);
+}
+
 int main(void) {
     ResetGraph(0);InitGeom();SetVideoMode(MODE_NTSC);
     SetDefDispEnv(&disp[0],0,0,W,H);SetDefDrawEnv(&draw[0],0,H,W,H);
     SetDefDispEnv(&disp[1],0,H,W,H);SetDefDrawEnv(&draw[1],0,0,W,H);
     draw[0].isbg=draw[1].isbg=1;setRGB0(&draw[0],12,16,29);setRGB0(&draw[1],12,16,29);
     FntLoad(960,0);font_top=FntOpen(8,6,304,24,0,100);font_bottom=FntOpen(8,211,304,25,0,110);
+    font_menu=FntOpen(18,56,288,144,0,400);
     InitPAD(pad1,sizeof(pad1),pad2,sizeof(pad2));StartPAD();ChangeClearPAD(0);
     SetDispMask(1);reset_match();
     while(1) {
         uint16_t p=pad_buttons();if((p&PAD_SELECT)&&!(previous_pad&PAD_SELECT))camera_side=!camera_side;
-        game_tick(p);render();
+        app_tick(p);
+        if(app_screen==SCREEN_FIGHT)render();else render_menu();
     }
 }
 #endif

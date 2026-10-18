@@ -1,17 +1,28 @@
-# Unlimited Fighting Champs — PS1 3D prototype v0.3
+# Unlimited Fighting Champs — PS1 beta v0.4
 
 Original PlayStation homebrew combat game built with PSn00bSDK v0.24.
 
-## What changed in v0.3
+## What changed in beta v0.4
 
-- Replaced cuboid body parts with anatomical meshes: tapered thighs and calves, biceps and forearms, rounded shoulders, pectorals, a narrower waist and a shaped rib cage.
-- Added Gouraud vertex lighting so muscles and faces shade smoothly instead of showing only flat box faces.
-- Rebuilt the heads with chin/jaw/cheek/skull profiles, noses, ears, eye sockets, eyebrows, mouth lines, hair and a beard on the red fighter.
-- Added bare feet, shaped toes, rounded fingerless MMA gloves, colored wrist wraps and fitted shorts.
-- Refined adult body proportions, guard positions, breathing motion and eased strike animation.
-- Increased depth precision for facial details, cached camera trigonometry, and culled hidden model faces.
+The game now boots into a title screen. Press **Start** to open the mode menu, select **Fight Now**, then choose one of four fighters before the match begins.
 
-The characters are more detailed PS1-style models, still an early prototype. They are not photorealistic, and there are no textures, music, sound effects, grappling, submissions or character selection yet. v0.2 was confirmed working by the user in emulation. v0.3 has compile/disc validation, combat simulation checks and inspection of software previews of its polygon draw commands. Its actual emulator appearance and frame rate still need testing.
+| Playable fighter | Nickname | Appearance |
+| --- | --- | --- |
+| Conor McSnack | The Notoriously Hungry | Green shorts, auburn hair and beard, lean build |
+| Jon Boneless | Bones? What Bones? | Purple shorts, dark cropped hair, taller build |
+| Brock Lunchner | The Lunch Break | Red shorts, blond buzz cut, heavyweight build |
+| Chuck Liddoodle | The Iced Latte | Blue shorts, dark mohawk and beard |
+
+These are fictional comic parody names. All four are selectable and playable against a different randomly chosen CPU opponent. Combat rules are shared in this beta; their current differences are appearance and proportions.
+
+- Added title, mode select and character select screens with a live 3D preview.
+- Start advances from the title; X or Start confirms menu choices.
+- D-pad cycles through all four fighters; Circle goes back.
+- Held buttons cannot skip through multiple screens.
+- Pause a match, then press Circle to return to character select. After a result, wait for the short delay, then use Cross to rematch or Circle to choose another fighter.
+- The match HUD displays the selected fighter names.
+
+Only **Fight Now** is enabled in this beta. There is no career, tournament, multiplayer, music, sound, grappling or submissions yet. v0.3 was confirmed running by the user in emulation. v0.4 has automated menu/combat tests, visual inspection of software previews, compilation and disc validation; its new screens still need an emulator check.
 
 ## Download and play
 
@@ -20,6 +31,10 @@ Open **Actions**, select the latest successful **Build PS1 BIN-CUE** run, and do
 ## Controls
 
 | Button | Action |
+| Start on title | Open mode select |
+| X / Start in menus | Confirm choice |
+| D-pad in character select | Choose fighter |
+| Circle in menus | Back |
 | --- | --- |
 | D-pad left/right | Move across the arena |
 | D-pad up/down | Move into/out of the arena |
@@ -31,7 +46,7 @@ Open **Actions**, select the latest successful **Build PS1 BIN-CUE** run, and do
 | Start | Pause / resume |
 | Select | Change camera angle |
 
-Blue is the player; red is the CPU. Green bars show health; gold bars show stamina. Fights last 90 seconds or end with a knockout. Higher remaining health wins at the time limit.
+The selected fighter is the player; the other fighter is the CPU. Green bars show health; gold bars show stamina. Fights last 90 seconds or end with a knockout. Higher remaining health wins at the time limit.
 
 ## Build locally
 
@@ -50,7 +65,7 @@ cc -std=c99 -O2 combat_test.c -o combat_test
 ./combat_test
 ```
 
-These cover contact timing, one hit per attack, guard reduction, insufficient stamina, depth misses, knockout falls, rematch, pause and 15,000 randomized simulation frames.
+These also cover title/mode/roster navigation, input latching, all four playable selections, distinct CPU picks, back navigation and rematches. Combat checks cover contact timing, one hit per attack, guard reduction, insufficient stamina, depth misses, knockout falls, rematch, pause and 15,000 randomized simulation frames.
 
 ## Source
 
