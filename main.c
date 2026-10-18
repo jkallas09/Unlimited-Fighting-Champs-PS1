@@ -1,4 +1,4 @@
-/* Unlimited Fighting Champs 0.5 - original polygonal PS1 combat prototype.
+/* Unlimited Fighting Champs 0.6 - original polygonal PS1 combat prototype.
  * Integer-only perspective renderer; no commercial meshes or textures.
  */
 #include <stdint.h>
@@ -42,14 +42,18 @@ static const Character roster[4]={
     {"BROCK LUNCHNER","THE LUNCH BREAK",221,176,139,176,45,39,166,123,64,5,108,0,2},
     {"CHUCK LIDDOODLE","THE ICED LATTE",198,145,111,42,99,195,43,29,24,2,99,1,3}
 };
-enum {SCREEN_TITLE,SCREEN_MODE,SCREEN_CHARACTER,SCREEN_WALKOUT,SCREEN_FIGHT};
+enum {SCREEN_TITLE,SCREEN_MODE,SCREEN_CHARACTER,SCREEN_WALKOUT,SCREEN_FIGHT,SCREEN_INTERVAL};
 static int app_screen=SCREEN_TITLE,chosen_character,opponent_character=1,menu_ticks;
 static uint16_t menu_previous;
 static int walkout_phase,walkout_frame;
 #define WALKOUT_FRAMES 300
 
 static Fighter player,cpu;
+#define ROUND_TICKS (60*300)
+#define CLOCK_RATE 2
+#define INTERVAL_FRAMES 480
 static int round_frames,finished,restart_delay,paused,ticks;
+static int round_number=1,interval_frame,score_player,score_cpu,round_start_player,round_start_cpu,decision_winner;
 static int impact_frames,impact_shake;
 static uint16_t previous_pad;
 static unsigned int seed=0x1234567u;
@@ -63,7 +67,25 @@ static const int reach[5]={0,81,92,102,113};
 static void reset_match(void) {
     player=(Fighter){.x=-100,.z=0,.hp=100,.stamina=100,.facing=1,.character=chosen_character,.face_x=1024};
     cpu=(Fighter){.x=100,.z=0,.hp=100,.stamina=100,.facing=-1,.character=opponent_character,.face_x=1024};
-    round_frames=60*90;finished=0;restart_delay=0;paused=0;impact_frames=impact_shake=0;
+    round_frames=ROUND_TICKS;round_number=1;interval_frame=0;
+    score_player=score_cpu=decision_winner=0;round_start_player=round_start_cpu=100;
+    finished=0;restart_delay=0;paused=0;impact_frames=impact_shake=0;
+}
+static void finish_round(void) {
+    int pd=round_start_cpu-cpu.hp,cd=round_start_player-player.hp;
+    score_player+=pd>=cd?10:9;score_cpu+=cd>=pd?10:9;
+    if(round_number>=3) {
+        finished=1;restart_delay=90;
+        decision_winner=score_player>score_cpu?1:(score_cpu>score_player?-1:0);
+    } else {app_screen=SCREEN_INTERVAL;interval_frame=0;}
+}
+static void next_round(uint16_t pad) {
+    int ph=clamp(player.hp+6,1,100),ch=clamp(cpu.hp+6,1,100);
+    int pn=player.character,cn=cpu.character;
+    player=(Fighter){.x=-100,.hp=ph,.stamina=100,.facing=1,.character=pn,.face_x=1024};
+    cpu=(Fighter){.x=100,.hp=ch,.stamina=100,.facing=-1,.character=cn,.face_x=1024};
+    round_start_player=ph;round_start_cpu=ch;round_number++;round_frames=ROUND_TICKS;
+    impact_frames=impact_shake=0;previous_pad=pad;app_screen=SCREEN_FIGHT;
 }
 static void boundary(Fighter *f) {
     f->x=clamp(f->x,-230,230); f->z=clamp(f->z,-145,145);
@@ -170,7 +192,8 @@ static void game_tick(uint16_t p) {
         if(!restart_delay&&(pressed&PAD_CROSS))reset_match();
         return;
     }
-    if(--round_frames<=0){round_frames=0;finished=1;restart_delay=90;return;}
+    round_frames=clamp(round_frames-CLOCK_RATE,0,ROUND_TICKS);
+    if(!round_frames){finish_round();return;}
     if(impact_frames){impact_frames--;return;}
     player.guard=(!player.attack&&!player.stun)?((p&PAD_L2)?2:((p&PAD_L1)?1:0)):0;
     face_opponent(&player,&cpu);face_opponent(&cpu,&player);
@@ -205,6 +228,11 @@ static void app_tick(uint16_t p) {
         game_tick(p);return;
     }
     menu_ticks++;ticks++;
+    if(app_screen==SCREEN_INTERVAL) {
+        interval_frame++;
+        if(interval_frame>=INTERVAL_FRAMES || (pressed&PAD_START))next_round(p);
+        return;
+    }
     if(app_screen==SCREEN_WALKOUT) {
         walkout_frame++;
         if(walkout_frame>=WALKOUT_FRAMES || (pressed&PAD_START)) {
@@ -229,11 +257,13 @@ static void app_tick(uint16_t p) {
     }
 }
 
+#include "fighter_pose.h"
+
 #ifndef HOST_TEST
 #define W 320
 #define H 240
 #define OT_LEN 1024
-#define PACKETS 98304
+#define PACKETS 131072
 static DISPENV disp[2];static DRAWENV draw[2];
 static uint32_t ot[2][OT_LEN],packet[2][PACKETS/4];
 static uint8_t pad1[34],pad2[34];
@@ -245,9 +275,7 @@ static int shake_x,shake_y;
 static void *background_tail;
 static void *hud_tail;
 static int depth_override;
-typedef struct {int x,y,z;} Vec;
 typedef struct {int x,y,d;} Screen;
-static Vec vec(int x,int y,int z) {return (Vec){x,y,z};}
 static uint16_t pad_buttons(void) {
     if(pad1[0] || (pad1[1]!=0x41 && pad1[1]!=0x73 && pad1[1]!=0x53)) return 0;
     return (uint16_t)~((unsigned)pad1[2]|((unsigned)pad1[3]<<8));
@@ -293,7 +321,12 @@ static void box(int x,int y,int z,int wx,int hy,int dz,int r,int g,int b) {
     Vec v[8];for(int i=0;i<8;i++)v[i]=vec(x+((i&1)?wx:-wx),y+((i&2)?hy:-hy),z+((i&4)?dz:-dz));
     solid(v,r,g,b);
 }
+static int model_twist,model_lean;
 static Vec body_vertex(Fighter *f,Vec p) {
+    /* Pelvis drives the chest, shoulders and head with a graded axial twist. */
+    int weight=clamp((p.y-83)*256/45,0,256);
+    p=twist_point(p,model_twist*weight/256);
+    p.x+=model_lean*weight/256;
     /* Collapse the articulated model sideways on a knockout. */
     int oldy=p.y;
     p.x+=oldy*f->fall/20;p.y=oldy*(18-f->fall)/18+f->fall/2;
@@ -395,7 +428,12 @@ static void detailed_head(Fighter *f,int lean,int bob,int sr,int sg,int sb) {
         const Ring beard[3]={{0,7,6,2},{3,9,8,1},{6,9,8,1}};
         loft(f,lean,149+bob,0,beard,3,hr,hg,hb);
     }
+    /* Nasolabial planes, cheek hollows, lips and separate nostrils. */
     for(int side=-1;side<=1;side+=2) {
+        skin_line(f,vec(lean+10,163+bob,side*8),vec(lean+9,159+bob,side*7),sr-24,sg-21,sb-18);
+        skin_line(f,vec(lean+12,160+bob,side*2),vec(lean+13,160+bob,side*3),70,47,40);
+        skin_line(f,vec(lean+11,156+bob,side*4),vec(lean+12,157+bob,0),sr-30,sg-30,sb-21);
+        skin_line(f,vec(lean+9,154+bob,side*5),vec(lean+7,153+bob,side*6),sr-20,sg-18,sb-15);
         oval(f,lean-1,162+bob,side*9,3,5,2,sr-12,sg-12,sb-10);
         /* Eye sockets, brows and small eye highlights follow the cheek plane. */
         oval(f,lean+8,166+bob,side*6,3,2,3,sr-40,sg-37,sb-30);
@@ -403,6 +441,14 @@ static void detailed_head(Fighter *f,int lean,int bob,int sr,int sg,int sb) {
         skin_line(f,vec(lean+11,166+bob,side*4),vec(lean+9,166+bob,side*7),55,42,36);
         skin_line(f,vec(lean+11,167+bob,side*4),vec(lean+10,167+bob,side*5),208,197,174);
     }
+    /* Hairline and short strands follow each character's cut. */
+    for(int i=-2;i<=2;i++) {
+        int z=i*3;
+        if(ch->hair_style!=3 || absi(z)<3)
+            skin_line(f,vec(lean+7,171+bob,z),vec(lean+4,175+bob,z),clamp(hr+23,0,255),hg+18,hb+12);
+        if(ch->beard)skin_line(f,vec(lean+8,153+bob,z),vec(lean+8,150+bob,z),hr+15,hg+12,hb+8);
+    }
+    if(f->character==3)skin_line(f,vec(lean+11,169+bob,-7),vec(lean+10,166+bob,-7),sr-40,sg-38,sb-25);
     /* A wedge gives the nose a bridge and tip instead of a box. */
     Vec bridge=vec(lean+11,167+bob,0),tip=vec(lean+16,161+bob,0);
     Vec nl=vec(lean+11,160+bob,-3),nr=vec(lean+11,160+bob,3);
@@ -415,45 +461,46 @@ static void bare_foot(Fighter *f,Vec foot,int sr,int sg,int sb) {
     Ring shape[4]={{-4,7,4,-2},{-1,13,6,4},{3,12,6,4},{7,5,4,-2}};
     loft(f,foot.x,foot.y,foot.z,shape,4,sr,sg,sb);
     skin_line(f,vec(foot.x+15,foot.y+1,foot.z-4),vec(foot.x+15,foot.y+1,foot.z+4),sr-45,sg-35,sb-25);
+    for(int toe=-3;toe<=3;toe+=2)skin_line(f,vec(foot.x+12,foot.y+3,foot.z+toe),vec(foot.x+16,foot.y+2,foot.z+toe),sr-28,sg-24,sb-18);
+    skin_line(f,vec(foot.x,foot.y+6,foot.z-3),vec(foot.x+8,foot.y+4,foot.z-3),sr+5,sg+4,sb+3);
 }
 static void fighter_draw(Fighter *f,int red,int green,int blue) {
-    int pulse=0;
-    if(f->attack) {
-        int apex=contact[f->attack];
-        pulse=f->age<=apex?f->age*256/apex:(duration[f->attack]-f->age)*256/(duration[f->attack]-apex);
-        /* Ease joint motion in and out instead of a mechanical linear swing. */
-        pulse=pulse*pulse*(768-2*pulse)/65536;
-    }
-    int step=isin(f->walk)*7/4096,bob=isin(ticks*62)/2048;
-    int lean=3+(f->attack==2?pulse*10/256:0);
+    FightPose pose=fighter_pose(f,ticks);
+    int bob=pose.bob,lean=pose.lean;
+    model_twist=pose.twist;model_lean=0;
     const Character *ch=&roster[f->character];
     int sr=ch->skin_r,sg=ch->skin_g,sb=ch->skin_b;
     if(f->flash){sr=249;sg=221;sb=185;}
     int broad=ch->bulk;
     /* Adult proportions: long legs, narrow waist, broad upper chest, smaller head. */
-    Vec hip[2]={vec(-2,85,-12),vec(3,85,12)};
-    Vec knee[2]={vec(-12+step,46,-16),vec(15-step,47,15)};
-    Vec foot[2]={vec(-21+step,5,-19),vec(28-step,5,18)};
-    if(f->attack>=3) {
-        knee[1]=vec(22+pulse*22/256,47+pulse*28/256,15);
-        foot[1]=vec(28+pulse*(f->attack==4?69:57)/256,5+pulse*85/256,18);
-    }
+    Vec *hip=pose.hip,*knee=pose.knee,*foot=pose.foot;
     for(int side=0;side<2;side++) {
-        Vec upper=vec((hip[side].x*3+knee[side].x)/4,75,hip[side].z);
+        Vec upper=hip[side];
         muscle(f,knee[side],upper,6,10+broad,9,sr,sg,sb);
         muscle(f,foot[side],knee[side],4,7+broad,6,sr-6,sg-5,sb-4);
         oval(f,knee[side].x,knee[side].y,knee[side].z,6,6,6,sr-7,sg-7,sb-5);
         bare_foot(f,foot[side],sr,sg,sb);
         /* Individual short legs avoid a solid rectangular pelvis. */
-        Ring short_leg[3]={{0,11,10,0},{7,12+broad,10,0},{17,12,10,0}};
-        loft(f,hip[side].x,70,hip[side].z,short_leg,3,red,green,blue);
+        /* Cloth follows the lifted thigh rather than hanging through the leg. */
+        Vec hem_center=vec(hip[side].x+(knee[side].x-hip[side].x)/3,
+            hip[side].y+(knee[side].y-hip[side].y)/3,hip[side].z+(knee[side].z-hip[side].z)/3);
+        muscle(f,hem_center,hip[side],11+broad,12+broad,12,red,green,blue);
         Ring hem[2]={{0,11,10,0},{2,11,10,0}};
-        loft(f,hip[side].x,70,hip[side].z,hem,2,red*3/4,green*3/4,blue*3/4);
+        loft(f,hem_center.x,hem_center.y,hem_center.z,hem,2,red*3/4,green*3/4,blue*3/4);
     }
     Ring shorts[3]={{0,12,18,0},{8,13,19,0},{15,10,16,0}};
     loft(f,0,79,0,shorts,3,red,green,blue);
     Ring belt[2]={{0,11,17,0},{3,11,17,0}};
     loft(f,0,91,0,belt,2,24,27,32);
+    /* Contrast side gussets, waistband stitching, drawcord and front badge. */
+    for(int side=-1;side<=1;side+=2) {
+        Vec a=vec(-6,81,side*18),b=vec(7,81,side*18),c=vec(-5,90,side*18),d=vec(6,90,side*18);
+        face(body_vertex(f,a),body_vertex(f,b),body_vertex(f,c),body_vertex(f,d),215,218,209,220);
+        skin_line(f,vec(-5,80,side*19),vec(-5,91,side*18),34,37,43);
+    }
+    skin_line(f,vec(12,93,-13),vec(12,93,13),151,157,161);
+    skin_line(f,vec(12,92,0),vec(15,85,-3),220,219,208);
+    skin_line(f,vec(12,92,0),vec(15,86,4),220,219,208);
     Ring torso[7]={{0,9,15,0},{9,10,16,0},{20,12,20,1},
         {31,13,24+broad,2},{40,12,25+broad,2},{45,9,19,2},{50,5,7,2}};
     loft(f,lean/2,94+bob,0,torso,7,sr,sg,sb);
@@ -464,26 +511,50 @@ static void fighter_draw(Fighter *f,int red,int green,int blue) {
     }
     skin_line(f,vec(lean/2+12,100+bob,0),vec(lean/2+15,119+bob,0),sr-18,sg-17,sb-13);
     for(int y=105;y<=115;y+=5)skin_line(f,vec(lean/2+12,y+bob,-6),vec(lean/2+12,y+bob,6),sr-13,sg-12,sb-10);
+    /* Obliques, clavicles, sternum and collar tendons. */
+    for(int side=-1;side<=1;side+=2) {
+        skin_line(f,vec(lean/2+10,102+bob,side*12),vec(lean/2+12,115+bob,side*15),sr-19,sg-16,sb-12);
+        skin_line(f,vec(lean/2+11,136+bob,side*4),vec(lean/2+8,137+bob,side*20),sr-25,sg-21,sb-16);
+        skin_line(f,vec(lean+5,144+bob,side*4),vec(lean+5,150+bob,side*3),sr+8,sg+6,sb+4);
+    }
+    oval(f,lean/2+12,102+bob,0,1,2,2,sr-34,sg-28,sb-19);
+    /* Original ink motifs: chest wings, geometric bands and a back emblem. */
+    if(f->character==0)for(int side=-1;side<=1;side+=2)for(int j=0;j<4;j++) {
+        skin_line(f,vec(lean/2+16,130+bob-j,side*3),vec(lean/2+14,135+bob-j*2,side*(9+j*3)),51,64,66);
+        skin_line(f,vec(lean/2+14,114+bob-j*2,side*(3+j)),vec(lean/2+14,109+bob-j*2,side*(6+j)),57,67,65);
+    }
+    if(f->character==1)for(int side=-1;side<=1;side+=2)for(int j=0;j<3;j++)
+        skin_line(f,vec(lean/2+14,131+bob-j*4,side*5),vec(lean/2+13,129+bob-j*4,side*13),54,48,47);
+    if(f->character==2) {
+        skin_line(f,vec(lean/2+15,104+bob,0),vec(lean/2+17,132+bob,0),82,77,75);
+        for(int side=-1;side<=1;side+=2)skin_line(f,vec(lean/2+17,128+bob,0),vec(lean/2+16,125+bob,side*8),82,77,75);
+    }
     Ring neck[3]={{0,6,7,0},{7,5,6,0},{11,6,6,1}};
     loft(f,lean+1,139+bob,0,neck,3,sr-10,sg-8,sb-6);
-    detailed_head(f,lean+2,bob,sr,sg,sb);
+    detailed_head(f,lean+2+pose.head,bob,sr,sg,sb);
     for(int side=-1;side<=1;side+=2) {
-        Vec shoulder=vec(lean/2+1,133+bob,side*(25+broad));
-        Vec elbow=vec(10,108+bob,side*28),hand=vec(28,133+bob,side*18);
-        if(f->guard==1){elbow=vec(16,126,side*25);hand=vec(28,157,side*12);}
-        if(f->guard==2){elbow=vec(15,105,side*25);hand=vec(27,120,side*13);}
-        if(f->attack && f->attack<3 && side==(f->attack==1?-1:1)) {
-            elbow.x+=pulse*32/256;elbow.y+=pulse*20/256;
-            hand.x+=pulse*(f->attack==2?55:47)/256;hand.y+=pulse*5/256;
-        }
+        int arm=side==1?1:0;
+        /* Arm points are already rotated by the animation rig. */
+        Vec shoulder=pose.shoulder[arm],elbow=pose.elbow[arm],hand=pose.hand[arm];
+        model_twist=0;
         oval(f,shoulder.x,shoulder.y,shoulder.z,8,9,8,sr,sg,sb);
         muscle(f,elbow,shoulder,4,7+broad,7,sr,sg,sb);
         muscle(f,elbow,hand,4,6,4,sr-3,sg-2,sb-2);
+        Vec crease=blend_pose(elbow,hand,80);
+        skin_line(f,vec(crease.x+3,crease.y,crease.z-2),vec(crease.x+3,crease.y+3,crease.z+2),sr-24,sg-20,sb-15);
+        if(f->character==3 && side==1)for(int j=0;j<3;j++)
+            skin_line(f,vec(elbow.x+3,elbow.y+5+j*3,elbow.z-5),vec(elbow.x+4,elbow.y+5+j*3,elbow.z+5),52,62,68);
         oval(f,hand.x,hand.y,hand.z,7,6,6,29,30,33);
         oval(f,hand.x+5,hand.y+1,hand.z,4,4,5,sr,sg,sb);
         muscle(f,vec(hand.x-4,hand.y-3,hand.z),vec(hand.x-4,hand.y+2,hand.z),5,5,5,red,green,blue);
         skin_line(f,vec(hand.x+8,hand.y-1,hand.z-3),vec(hand.x+8,hand.y-1,hand.z+3),sr-45,sg-35,sb-25);
+        for(int j=-3;j<=3;j+=2) {
+            skin_line(f,vec(hand.x+6,hand.y+3,hand.z+j),vec(hand.x+9,hand.y+1,hand.z+j),sr-28,sg-23,sb-17);
+            skin_line(f,vec(hand.x-3,hand.y+5,hand.z+j),vec(hand.x+2,hand.y+5,hand.z+j),124,132,137);
+        }
+        oval(f,hand.x+1,hand.y-3,hand.z-side*5,3,3,3,sr-5,sg-4,sb-3);
     }
+    model_twist=model_lean=0;
 }
 
 static const int ring_x[8]={-240,240,300,300,240,-240,-300,-300};
@@ -516,6 +587,50 @@ static void stadium(void) {
             world_gradient(vec(x-12,y+5,z),vec(x+12,y+5,z),vec(x-9,y+32,z),vec(x+9,y+32,z),42+tone*13,45+tone*5,67+tone*4,140,140,230,230);
             face(vec(x-5,y+32,z-1),vec(x+5,y+32,z-1),vec(x-5,y+43,z-1),vec(x+5,y+43,z-1),103+tone*16,76+tone*12,61+tone*9,210);
             if((ticks/5+i*17+row*9)%101==0)box(x+9,y+31,z-3,2,2,1,220,236,255);
+        }
+    }
+    /* Side grandstands, aisle rails, rows of individual seats and spectators. */
+    for(int side=-1;side<=1;side+=2)for(int row=0;row<2;row++) {
+        int x=side*(400+row*64),y=24+row*31;
+        box(x,y-12,0,28,9,275,25,33,47);
+        for(int j=0;j<10;j++) {
+            int z=-250+j*55,tone=(j*7+row*11)%5;
+            face(vec(x-11,y-4,z),vec(x+11,y-4,z),vec(x-11,y+4,z),vec(x+11,y+4,z),73,43,49,210);
+            face(vec(x-9,y+3,z-1),vec(x+9,y+3,z-1),vec(x-8,y+28,z-1),vec(x+8,y+28,z-1),37+tone*14,50+tone*8,68+tone*5,220);
+            face(vec(x-5,y+28,z-2),vec(x+5,y+28,z-2),vec(x-5,y+39,z-2),vec(x+5,y+39,z-2),113+tone*17,83+tone*13,65+tone*10,230);
+        }
+        edge(vec(x-side*30,y+20,-275),vec(x-side*30,y+20,275),81,92,107);
+        for(int j=-2;j<=2;j++)edge(vec(x-side*30,y-8,j*120),vec(x-side*30,y+20,j*120),71,83,97);
+    }
+    /* Production desks, monitors, officials and television camera rigs. */
+    for(int side=-1;side<=1;side+=2) {
+        box(side*173,40,-245,60,3,17,37,44,53);
+        box(side*126,20,-245,3,20,12,50,61,72);box(side*220,20,-245,3,20,12,50,61,72);
+        for(int j=-1;j<=1;j++) {
+            int x=side*173+j*34;
+            box(x,43,-245,11,2,8,65,75,84);box(x,53,-252,11,8,2,16,23,35);
+            face(vec(x-8,48,-255),vec(x+8,48,-255),vec(x-8,58,-255),vec(x+8,58,-255),43,107,140,210);
+            box(x,35,-278,9,15,7,31,37,44);box(x,56,-278,5,6,5,175,133,101);
+            edge(vec(x,45,-274),vec(x+12,43,-247),115,87,69);
+        }
+        int cx=side*340;
+        edge(vec(cx,0,-180),vec(cx,75,-175),100,111,123);
+        edge(vec(cx-17,0,-190),vec(cx,65,-175),70,83,98);
+        edge(vec(cx+17,0,-190),vec(cx,65,-175),70,83,98);
+        box(cx,81,-175,12,8,13,28,34,42);box(cx,81,-156,6,6,8,64,73,82);
+        box(cx,93,-178,3,2,4,202,44,50);
+    }
+    /* Overhead truss structure, warm/cool lamps and animated LED fascia. */
+    for(int side=-1;side<=1;side+=2) {
+        for(int z=-160;z<=280;z+=55) {
+            edge(vec(side*330,240,z),vec(side*330,264,z+55),67,81,97);
+            edge(vec(side*330,264,z),vec(side*330,240,z+55),67,81,97);
+        }
+        edge(vec(side*330,240,-160),vec(side*330,240,335),83,97,112);
+        edge(vec(side*330,264,-160),vec(side*330,264,335),83,97,112);
+        for(int i=0;i<8;i++) {
+            int z=-130+i*60,lit=(i+ticks/18)%4==0;
+            box(side*321,234,z,7,4,8,lit?236:92,lit?211:115,lit?169:144);
         }
     }
     /* Entrance tunnel, lit truss and an aisle leading to the fighting floor. */
@@ -567,6 +682,10 @@ static void arena(void) {
         if(view_z<-50)continue;
         box(ring_x[i],91,ring_z[i],5,91,5,28,37,47);
         box(ring_x[i],132,ring_z[i],8,42,8,(i&1)?140:34,(i&1)?41:84,(i&1)?49:117);
+        for(int y=102;y<=160;y+=24) {
+            edge(vec(ring_x[i]-8,y,ring_z[i]-8),vec(ring_x[i]+8,y,ring_z[i]-8),171,176,177);
+            edge(vec(ring_x[i]+8,y,ring_z[i]-8),vec(ring_x[i]+8,y,ring_z[i]+8),142,152,159);
+        }
         edge(on_fence(i,0,182),on_fence(i,256,182),103,119,131);
         edge(on_fence(i,0,10),on_fence(i,256,10),64,75,84);
         for(int segment=0;segment<8;segment++)for(int row=0;row<4;row++) {
@@ -618,6 +737,7 @@ static void lettering(int x,int y,const char *text,int scale,int r,int g,int b) 
         if(c>='A'&&c<='Z')glyph=c-'A';
         else if(c>='0'&&c<='9')glyph=26+c-'0';
         if(glyph<0) {
+            if(c==':'){hud_rect(x+2*scale,y+2*scale,scale,scale,r,g,b);hud_rect(x+2*scale,y+5*scale,scale,scale,r,g,b);}
             if(c=='.')hud_rect(x+2*scale,y+6*scale,scale,scale,r,g,b);
             if(c=='-')hud_rect(x,y+3*scale,5*scale,scale,r,g,b);
             continue;
@@ -713,10 +833,12 @@ static void fight_hud(void) {
     hud_rect(183,3,129,2,cc->short_r,cc->short_g,cc->short_b);
     lettering(8,10,pc->name,1,231,235,235);
     lettering(312-text_width(cc->name),10,cc->name,1,231,235,235);
-    menu_panel(143,4,34,33,1,191,48,61);
-    char clock[4];snprintf(clock,sizeof(clock),"%02d",clamp(round_frames/60,0,99));
-    lettering(149,12,clock,2,238,230,220);
-    center_text(38,"ROUND 1",1,148,167,181);
+    menu_panel(139,4,42,30,1,191,48,61);
+    int seconds=clamp((round_frames+59)/60,0,300);
+    char clock[16];snprintf(clock,sizeof(clock),"%d:%02d",seconds/60,seconds%60);
+    lettering(149,14,clock,1,238,230,220);
+    char rnd_label[24];snprintf(rnd_label,sizeof(rnd_label),"ROUND %d OF 3 - 2X CLOCK",round_number);
+    center_text(38,rnd_label,1,148,167,181);
     Fighter *f[2]={&player,&cpu};
     for(int i=0;i<2;i++) {
         int x=i?183:8,hp=f[i]->hp;
@@ -737,8 +859,9 @@ static void render(void) {
     fight_hud();
     if(paused)FntPrint(font_bottom,"PAUSED - START RESUME  O ROSTER\nSELECT: CHANGE CAMERA");
     else if(finished) {
-        const char *winner=player.hp==cpu.hp?"DRAW":(player.hp>cpu.hp?"YOU WIN":"CPU WINS");
-        FntPrint(font_bottom,"%s - %s\nX REMATCH  O FIGHTER SELECT",winner,(!player.hp||!cpu.hp)?"KNOCKOUT":"TIME UP");
+        int result=(!player.hp||!cpu.hp)?(player.hp>cpu.hp?1:-1):decision_winner;
+        const char *winner=result==0?"DRAW":(result>0?"YOU WIN":"CPU WINS");
+        FntPrint(font_bottom,"%s - %s\nX REMATCH  O FIGHTER SELECT",winner,(!player.hp||!cpu.hp)?"KNOCKOUT":"DECISION");
     } else FntPrint(font_bottom,"[] JAB /\\ POWER X BODY O HIGH KICK\nL1 HIGH GUARD L2 BODY GUARD START PAUSE");
     DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);DrawOTag(ot[db]+OT_LEN-1);
     FntFlush(font_top);FntFlush(font_bottom);
@@ -769,7 +892,7 @@ static void render_menu(void) {
     } else if(app_screen==SCREEN_MODE) {
         hud_quad(0,0,238,0,0,208,162,208,11,17,27);
         lettering(20,22,"SELECT MODE",3,235,237,234);
-        lettering(21,51,"BETA 0.5 - THE MAIN EVENT",1,132,156,175);
+        lettering(21,51,"BETA 0.6 - FIGHTER DETAIL",1,132,156,175);
         menu_panel(24,83,272,85,1,200,43,57);
         lettering(39,94,"01",1,203,67,77);
         lettering(39,112,"FIGHT NOW",3,244,239,232);
@@ -794,7 +917,7 @@ static void render_menu(void) {
         menu_panel(18,162,153,31,1,glow,45,57);
         lettering(29,171,"PRESS START",2,244,239,232);
         hud_rect(0,207,320,33,9,13,20);hud_rect(18,207,284,1,53,72,89);
-        FntPrint(font_bottom,"BETA 0.5     UNLIMITED FIGHTING CHAMPS\n      FOUR-FIGHTER SHOWCASE");
+        FntPrint(font_bottom,"BETA 0.6     UNLIMITED FIGHTING CHAMPS\n      FOUR-FIGHTER SHOWCASE");
     }
     DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);
     DrawOTag(ot[db]+OT_LEN-1);FntFlush(font_menu);FntFlush(font_bottom);
@@ -817,7 +940,8 @@ static void audio_tick(void) {
     if(music_phase!=walkout_phase) {
         (void)SpuSetKey(0,1);
         SPU_CH_FREQ(0)=getSPUSampleRate(WALKOUT_MUSIC_RATE);
-        SPU_CH_ADDR(0)=getSPUAddr(0x1010);SPU_CH_LOOP_ADDR(0)=getSPUAddr(0x1010);
+        unsigned address=0x1010+music_offsets[(walkout_phase?cpu:player).character];
+        SPU_CH_ADDR(0)=getSPUAddr(address);SPU_CH_LOOP_ADDR(0)=getSPUAddr(address);
         SPU_CH_ADSR1(0)=0x00ff;SPU_CH_ADSR2(0)=0x0000;
         (void)SpuSetKey(1,1);music_phase=walkout_phase;
     }
@@ -845,7 +969,68 @@ static void render_walkout(void) {
     menu_panel(15,173,290,32,1,ch->short_r,ch->short_g,ch->short_b);
     lettering(26,183,ch->name,2,239,234,226);
     hud_rect(15,207,time*290/WALKOUT_FRAMES,2,196,53,66);
-    FntPrint(font_bottom,"START SKIP TO NEXT ENTRANCE/FIGHT\nORIGINAL MUSIC: MAIN EVENT PULSE");
+    FntPrint(font_bottom,"START SKIP TO NEXT ENTRANCE/FIGHT\n%s",music_names[actor.character]);
+    DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);DrawOTag(ot[db]+OT_LEN-1);
+    FntFlush(font_bottom);
+}
+
+static void render_interval(void) {
+    db^=1;cursor=0;ClearOTagR(ot[db],OT_LEN);hud_tail=ot[db];
+    cam_x=0;cam_z=0;cam_distance=640;set_view(40,150,122);
+    backdrop();arena();
+    /* Adult ring-card attendant: sleeveless uniform, shorts, flat trainers. */
+    Fighter host={.x=-100+clamp(interval_frame,0,360)*200/360,.z=35,.hp=100,
+        .facing=1,.face_x=0,.face_z=-1024,.character=0};
+    int step=pose_sin(interval_frame*120)*7/1024;
+    model_twist=model_lean=0;
+    int sr=211,sg=162,sb=125;
+    for(int i=0;i<2;i++) {
+        int side=i?1:-1;
+        Vec hip=vec(0,84,side*10),foot=vec((i?step:-step),6,side*13);
+        Vec knee=solve_joint(hip,&foot,40,40,vec(20,0,0));
+        muscle(&host,knee,hip,5,8,8,sr,sg,sb);muscle(&host,foot,knee,3,5,5,sr,sg,sb);
+        oval(&host,foot.x+4,5,foot.z,11,4,6,204,209,210);
+        const Ring shorts[2]={{0,10,9,0},{15,11,9,0}};
+        loft(&host,0,70,side*10,shorts,2,28,34,44);
+        Vec shoulder=vec(0,132,side*20),hand=vec(20,205,side*36);
+        Vec elbow=solve_joint(shoulder,&hand,37,37,vec(0,0,side*30));
+        muscle(&host,elbow,shoulder,4,6,6,sr,sg,sb);muscle(&host,elbow,hand,4,5,3,sr,sg,sb);
+        oval(&host,hand.x,hand.y,hand.z,4,5,3,sr,sg,sb);
+    }
+    const Ring pelvis[3]={{0,10,18,0},{9,10,18,0},{15,8,14,0}};
+    loft(&host,0,78,0,pelvis,3,28,34,44);
+    const Ring uniform[6]={{0,8,14,0},{12,8,13,0},{23,10,17,0},{34,11,20,0},{43,7,14,0},{48,4,6,0}};
+    loft(&host,0,90,0,uniform,6,153,39,53);
+    const Ring neck[2]={{0,4,5,0},{10,4,5,0}};loft(&host,0,137,0,neck,2,sr,sg,sb);
+    const Ring head[6]={{0,5,4,2},{4,8,6,1},{11,9,8,0},{18,8,7,0},{23,5,4,-1},{25,0,0,-1}};
+    loft(&host,0,147,0,head,6,sr,sg,sb);
+    const Ring hair[4]={{0,9,8,-2},{8,9,9,-2},{14,6,6,-2},{17,0,0,-2}};
+    loft(&host,0,158,0,hair,4,65,42,28);
+    oval(&host,-8,154,0,5,14,8,65,42,28);
+    for(int side=-1;side<=1;side+=2) {
+        skin_line(&host,vec(9,160,side*3),vec(9,160,side*6),62,43,35);
+        skin_line(&host,vec(9,162,side*3),vec(8,163,side*6),65,42,28);
+    }
+    oval(&host,11,157,0,3,3,2,sr,sg,sb);
+    skin_line(&host,vec(10,152,-3),vec(10,152,3),141,67,63);
+    /* The card faces the broadcast camera and carries a geometric round numeral. */
+    face(body_vertex(&host,vec(23,196,-47)),body_vertex(&host,vec(23,196,47)),
+        body_vertex(&host,vec(23,253,-47)),body_vertex(&host,vec(23,253,47)),226,230,226,256);
+    depth_override=clamp(project(body_vertex(&host,vec(24,225,0))).d/2-4,1,OT_LEN-5);
+    for(int row=0;row<7;row++)for(int col=0;col<5;col++) {
+        int glyph=26+round_number+1;
+        if(alphabet[glyph][row]&(16>>col)) {
+            int z=-15+col*7,y=242-row*6;
+            face(body_vertex(&host,vec(24,y-5,z)),body_vertex(&host,vec(24,y-5,z+6)),
+                body_vertex(&host,vec(24,y,z)),body_vertex(&host,vec(24,y,z+6)),168,37,52,256);
+        }
+    }
+    depth_override=0;
+    hud_rect(0,0,320,35,9,13,20);
+    char label[40];snprintf(label,sizeof(label),"ROUND %d COMING UP",round_number+1);
+    center_text(12,label,2,231,232,226);
+    hud_rect(0,207,320,33,9,13,20);
+    FntPrint(font_bottom,"BETWEEN ROUNDS - START CONTINUE\nSCORE %d-%d   3 X 5 MIN / 2X CLOCK",score_player,score_cpu);
     DrawSync(0);VSync(0);PutDispEnv(&disp[db]);PutDrawEnv(&draw[db]);DrawOTag(ot[db]+OT_LEN-1);
     FntFlush(font_bottom);
 }
@@ -865,6 +1050,7 @@ int main(void) {
         app_tick(p);audio_tick();
         if(app_screen==SCREEN_FIGHT)render();
         else if(app_screen==SCREEN_WALKOUT)render_walkout();
+        else if(app_screen==SCREEN_INTERVAL)render_interval();
         else render_menu();
     }
 }
